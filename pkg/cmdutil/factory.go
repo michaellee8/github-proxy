@@ -35,6 +35,8 @@ type Factory struct {
 	// We need to revisit that, but I don't want to make it worse.
 	Config     func() (gh.Config, error)
 	HttpClient func() (*http.Client, error)
+	// HTTPClientWrapper applies process-level transport policy to command-specific clients.
+	HTTPClientWrapper func(*http.Client) *http.Client
 	// PlainHttpClient is a special HTTP client that does not automatically set
 	// auth and other headers. This is meant to be used in situations where the
 	// client needs to specify the headers itself (e.g. during login).

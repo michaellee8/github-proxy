@@ -1,0 +1,6 @@
+The Broker service is available inside the cluster at:
+
+  http://{{ include "pgh-broker.fullname" . }}:{{ .Values.service.port }}
+
+Terminate TLS in an ingress or gateway before setting PGH_HOST on an Agent Host.
+The Broker intentionally does not terminate TLS itself.

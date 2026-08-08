@@ -3,12 +3,25 @@ package keyring
 
 import (
 	"errors"
+	"os"
 	"time"
 
 	"github.com/zalando/go-keyring"
 )
 
 var ErrNotFound = errors.New("secret not found in keyring")
+
+// NamespaceEnv selects the application namespace used for keyring service names.
+const NamespaceEnv = "GH_KEYRING_NAMESPACE"
+
+// ServiceName returns the application-isolated keyring service for a hostname.
+func ServiceName(hostname string) string {
+	namespace := os.Getenv(NamespaceEnv)
+	if namespace == "" {
+		namespace = "gh"
+	}
+	return namespace + ":" + hostname
+}
 
 type TimeoutError struct {
 	message string

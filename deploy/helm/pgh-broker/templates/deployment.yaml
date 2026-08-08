@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pgh-broker.fullname" . }}
+  labels:
+    {{- include "pgh-broker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "pgh-broker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+      labels:
+        {{- include "pgh-broker.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: pgh-broker
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - --listen
+            - 0.0.0.0:8080
+          env:
+            - name: PGH_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "databaseURL.secretName is required" .Values.databaseURL.secretName }}
+                  key: {{ required "databaseURL.secretKey is required" .Values.databaseURL.secretKey }}
+            - name: PGH_ENCRYPTION_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "encryptionKeyring.secretName is required" .Values.encryptionKeyring.secretName }}
+                  key: {{ required "encryptionKeyring.keysSecretKey is required" .Values.encryptionKeyring.keysSecretKey }}
+            - name: PGH_ACTIVE_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "encryptionKeyring.secretName is required" .Values.encryptionKeyring.secretName }}
+                  key: {{ required "encryptionKeyring.activeKeyIDSecretKey is required" .Values.encryptionKeyring.activeKeyIDSecretKey }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

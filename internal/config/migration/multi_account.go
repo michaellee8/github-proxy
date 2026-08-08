@@ -220,5 +220,5 @@ func migrateConfig(c *config.Config, hostname, username string) error {
 }
 
 func keyringServiceName(hostname string) string {
-	return "gh:" + hostname
+	return keyring.ServiceName(hostname)
 }

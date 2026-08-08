@@ -1,0 +1,6 @@
+apiVersion: v2
+name: pgh-broker
+description: Repository-scoped GitHub credential Broker for pgh
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -512,7 +512,7 @@ func (c *AuthConfig) TokenForUser(hostname, user string) (string, string, error)
 }
 
 func keyringServiceName(hostname string) string {
-	return "gh:" + hostname
+	return keyring.ServiceName(hostname)
 }
 
 type AliasConfig struct {

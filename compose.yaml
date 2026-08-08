@@ -1,0 +1,42 @@
+name: pgh-broker
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: pgh
+      POSTGRES_USER: pgh
+      POSTGRES_PASSWORD: ${PGH_POSTGRES_PASSWORD:?set PGH_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgh -d pgh"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    volumes:
+      - pgh-postgres:/var/lib/postgresql/data
+
+  pgh-broker:
+    build:
+      context: .
+      dockerfile: Dockerfile.pgh-broker
+    environment:
+      PGH_ACTIVE_KEY_ID: ${PGH_ACTIVE_KEY_ID:?set PGH_ACTIVE_KEY_ID}
+      PGH_DATABASE_URL: postgresql://pgh:${PGH_POSTGRES_PASSWORD:?set PGH_POSTGRES_PASSWORD}@postgres:5432/pgh?sslmode=disable
+      PGH_ENCRYPTION_KEYS: ${PGH_ENCRYPTION_KEYS:?set PGH_ENCRYPTION_KEYS}
+      PGH_LISTEN_ADDR: 0.0.0.0:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+volumes:
+  pgh-postgres:

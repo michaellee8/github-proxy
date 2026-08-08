@@ -1,0 +1,8 @@
+.git
+.env
+bin
+docs
+share
+test
+**/*_test.go
+**/testdata

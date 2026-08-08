@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +51,22 @@ const (
 )
 
 func Main() exitCode {
+	return MainWithOptions(MainOptions{CommandName: "gh"})
+}
+
+// MainOptions customizes a CLI process while retaining the upstream command tree.
+type MainOptions struct {
+	CommandName       string
+	HTTPClientWrapper func(*http.Client) *http.Client
+	CommandValidator  func(*cobra.Command) error
+}
+
+// MainWithOptions runs the CLI with process-level adaptations.
+func MainWithOptions(opts MainOptions) exitCode {
+	commandName := opts.CommandName
+	if commandName == "" {
+		commandName = "gh"
+	}
 	buildDate := build.Date
 	buildVersion := build.Version
 	hasDebug, _ := utils.IsDebugEnabled()
@@ -68,7 +85,7 @@ func Main() exitCode {
 	}
 	stderr := ioStreams.ErrOut
 
-	ghExecutablePath := executablePath("gh")
+	ghExecutablePath := executablePath(commandName)
 
 	additionalCommonDimensions := ghtelemetry.Dimensions{
 		"version":             strings.TrimPrefix(buildVersion, "v"),
@@ -129,7 +146,9 @@ func Main() exitCode {
 	}
 	defer telemetryService.Flush()
 
-	cmdFactory := factory.New(buildVersion, string(agents.Detect()), cfgFunc, ioStreams, ghExecutablePath, telemetryService)
+	cmdFactory := factory.NewWithOptions(buildVersion, string(agents.Detect()), cfgFunc, ioStreams, ghExecutablePath, telemetryService, factory.Options{
+		HTTPClientWrapper: opts.HTTPClientWrapper,
+	})
 
 	if cfgErr == nil {
 		var m migration.MultiAccount
@@ -172,7 +191,10 @@ func Main() exitCode {
 		cobra.MousetrapHelpText = ""
 	}
 
-	rootCmd, err := root.NewCmdRoot(cmdFactory, telemetryService, buildVersion, buildDate)
+	rootCmd, err := root.NewCmdRootWithOptions(cmdFactory, telemetryService, buildVersion, buildDate, root.Options{
+		CommandName:      commandName,
+		CommandValidator: opts.CommandValidator,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to create root command: %s\n", err)
 		return exitError
@@ -226,15 +248,15 @@ func Main() exitCode {
 
 		if strings.Contains(err.Error(), "Incorrect function") {
 			fmt.Fprintln(stderr, "You appear to be running in MinTTY without pseudo terminal support.")
-			fmt.Fprintln(stderr, "To learn about workarounds for this error, run:  gh help mintty")
+			fmt.Fprintf(stderr, "To learn about workarounds for this error, run:  %s help mintty\n", commandName)
 			return exitError
 		}
 
 		var httpErr api.HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode == 401 {
-			authCommand := "gh auth login"
+			authCommand := commandName + " auth login"
 			if cfg, cfgErr := cmdFactory.Config(); cfgErr == nil {
-				authCommand = authRecoveryCommand(cfg, httpErr)
+				authCommand = authRecoveryCommandWithName(commandName, cfg, httpErr)
 			}
 			fmt.Fprintf(stderr, "Try authenticating with:  %s\n", authCommand)
 		} else if u := factory.SSOURL(); u != "" {
@@ -301,17 +323,21 @@ func printError(out io.Writer, err error, cmd *cobra.Command, debug bool) {
 }
 
 func authRecoveryCommand(cfg gh.Config, httpErr api.HTTPError) string {
+	return authRecoveryCommandWithName("gh", cfg, httpErr)
+}
+
+func authRecoveryCommandWithName(commandName string, cfg gh.Config, httpErr api.HTTPError) string {
 	if httpErr.RequestURL == nil {
-		return "gh auth login"
+		return commandName + " auth login"
 	}
 
 	hostname := ghauth.NormalizeHostname(httpErr.RequestURL.Hostname())
 	token, source := cfg.Authentication().ActiveToken(hostname)
 	if shared.AuthTokenRefreshable(token, source) {
-		return fmt.Sprintf("gh auth refresh -h %s", hostname)
+		return fmt.Sprintf("%s auth refresh -h %s", commandName, hostname)
 	}
 
-	return fmt.Sprintf("gh auth login -h %s", hostname)
+	return fmt.Sprintf("%s auth login -h %s", commandName, hostname)
 }
 
 func checkForUpdate(ctx context.Context, f *cmdutil.Factory, currentVersion string) (*update.ReleaseInfo, error) {

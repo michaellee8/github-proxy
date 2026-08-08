@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+var standaloneGHPattern = regexp.MustCompile("(^|[[:space:]$`])gh([[:space:]`])")
 
 func rootUsageFunc(w io.Writer, command *cobra.Command) error {
 	fmt.Fprintf(w, "Usage:  %s", command.UseLine())
@@ -89,6 +92,7 @@ func isRootCmd(command *cobra.Command) bool {
 
 func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, _ []string) {
 	flags := command.Flags()
+	commandName := command.Root().Name()
 
 	if isRootCmd(command) {
 		if versionVal, err := flags.GetBool("version"); err == nil && versionVal {
@@ -120,7 +124,7 @@ func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, _ []string) {
 	}
 	if longText != "" && command.LocalFlags().Lookup("jq") != nil {
 		longText = strings.TrimRight(longText, "\n") +
-			"\n\nFor more information about output formatting flags, see `gh help formatting`."
+			fmt.Sprintf("\n\nFor more information about output formatting flags, see `%s help formatting`.", commandName)
 	}
 
 	helpEntries := []helpEntry{}
@@ -187,45 +191,57 @@ func rootHelpFunc(f *cmdutil.Factory, command *cobra.Command, _ []string) {
 		helpEntries = append(helpEntries, helpEntry{"ENVIRONMENT VARIABLES", command.Annotations["help:environment"]})
 	}
 	helpEntries = append(helpEntries, helpEntry{"LEARN MORE", heredoc.Docf(`
-		Use %[1]sgh <command> <subcommand> --help%[1]s for more information about a command.
+		Use %[1]s%[2]s <command> <subcommand> --help%[1]s for more information about a command.
 		Read the manual at https://cli.github.com/manual
-		Learn about exit codes using %[1]sgh help exit-codes%[1]s
-		Learn about accessibility experiences using %[1]sgh help accessibility%[1]s
-	`, "`")})
+		Learn about exit codes using %[1]s%[2]s help exit-codes%[1]s
+		Learn about accessibility experiences using %[1]s%[2]s help accessibility%[1]s
+	`, "`", commandName)})
 
 	out := f.IOStreams.Out
 	for _, e := range helpEntries {
+		body := rebrandHelpText(e.Body, commandName)
 		if e.Title != "" {
 			// If there is a title, add indentation to each line in the body
 			fmt.Fprintln(out, cs.Bold(e.Title))
-			fmt.Fprintln(out, text.Indent(strings.Trim(e.Body, "\r\n"), "  "))
+			fmt.Fprintln(out, text.Indent(strings.Trim(body, "\r\n"), "  "))
 		} else {
 			// If there is no title print the body as is
-			fmt.Fprintln(out, e.Body)
+			fmt.Fprintln(out, body)
 		}
 		fmt.Fprintln(out)
 	}
 }
 
-func authHelp() string {
+func rebrandHelpText(helpText, commandName string) string {
+	if commandName == "gh" {
+		return helpText
+	}
+	return standaloneGHPattern.ReplaceAllString(helpText, "${1}"+commandName+"${2}")
+}
+
+func authHelp(commandName string) string {
+	tokenEnv := "GH_TOKEN"
+	if commandName != "gh" {
+		tokenEnv = "PGH_TOKEN"
+	}
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		return heredoc.Doc(`
-			gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable. Example:
+		return fmt.Sprintf(heredoc.Doc(`
+			%s: To use GitHub CLI in a GitHub Actions workflow, set the %s environment variable. Example:
 			  env:
-			    GH_TOKEN: ${{ github.token }}
-		`)
+			    %s: ${{ github.token }}
+		`), commandName, tokenEnv, tokenEnv)
 	}
 
 	if os.Getenv("CI") != "" {
-		return heredoc.Doc(`
-			gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.
-		`)
+		return fmt.Sprintf(heredoc.Doc(`
+			%s: To use GitHub CLI in automation, set the %s environment variable.
+		`), commandName, tokenEnv)
 	}
 
-	return heredoc.Doc(`
-		To get started with GitHub CLI, please run:  gh auth login
-		Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.
-	`)
+	return fmt.Sprintf(heredoc.Doc(`
+		To get started with GitHub CLI, please run:  %s auth login
+		Alternatively, populate the %s environment variable with an authentication token.
+	`), commandName, tokenEnv)
 }
 
 func findCommand(cmd *cobra.Command, name string) *cobra.Command {

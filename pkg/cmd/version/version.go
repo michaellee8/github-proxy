@@ -25,6 +25,11 @@ func NewCmdVersion(f *cmdutil.Factory, version, buildDate string) *cobra.Command
 }
 
 func Format(version, buildDate string) string {
+	return FormatWithCommandName("gh", version, buildDate)
+}
+
+// FormatWithCommandName formats version output for the given executable identity.
+func FormatWithCommandName(commandName, version, buildDate string) string {
 	version = strings.TrimPrefix(version, "v")
 
 	var dateStr string
@@ -32,7 +37,7 @@ func Format(version, buildDate string) string {
 		dateStr = fmt.Sprintf(" (%s)", buildDate)
 	}
 
-	return fmt.Sprintf("gh version %s%s\n%s\n", version, dateStr, changelogURL(version))
+	return fmt.Sprintf("%s version %s%s\n%s\n", commandName, version, dateStr, changelogURL(version))
 }
 
 func changelogURL(version string) string {

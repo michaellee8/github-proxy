@@ -34,13 +34,14 @@ const (
 )
 
 type ApiOptions struct {
-	AppVersion    string
-	InvokingAgent string
-	BaseRepo      func() (ghrepo.Interface, error)
-	Branch        func() (string, error)
-	Config        func() (gh.Config, error)
-	HttpClient    func() (*http.Client, error)
-	IO            *iostreams.IOStreams
+	AppVersion        string
+	InvokingAgent     string
+	BaseRepo          func() (ghrepo.Interface, error)
+	Branch            func() (string, error)
+	Config            func() (gh.Config, error)
+	HttpClient        func() (*http.Client, error)
+	HTTPClientWrapper func(*http.Client) *http.Client
+	IO                *iostreams.IOStreams
 
 	Hostname            string
 	RequestMethod       string
@@ -65,12 +66,13 @@ type ApiOptions struct {
 
 func NewCmdApi(f *cmdutil.Factory, runF func(*ApiOptions) error) *cobra.Command {
 	opts := ApiOptions{
-		AppVersion:    f.AppVersion,
-		InvokingAgent: f.InvokingAgent,
-		BaseRepo:      f.BaseRepo,
-		Branch:        f.Branch,
-		Config:        f.Config,
-		IO:            f.IOStreams,
+		AppVersion:        f.AppVersion,
+		InvokingAgent:     f.InvokingAgent,
+		BaseRepo:          f.BaseRepo,
+		Branch:            f.Branch,
+		Config:            f.Config,
+		HTTPClientWrapper: f.HTTPClientWrapper,
+		IO:                f.IOStreams,
 	}
 
 	cmd := &cobra.Command{
@@ -394,7 +396,7 @@ func apiRun(opts *ApiOptions) error {
 			if opts.Verbose {
 				log = opts.IO.Out
 			}
-			opts := api.HTTPClientOptions{
+			httpOpts := api.HTTPClientOptions{
 				AppVersion:     opts.AppVersion,
 				InvokingAgent:  opts.InvokingAgent,
 				CacheTTL:       opts.CacheTTL,
@@ -404,7 +406,14 @@ func apiRun(opts *ApiOptions) error {
 				LogColorize:    opts.IO.ColorEnabled(),
 				LogVerboseHTTP: opts.Verbose,
 			}
-			return api.NewHTTPClient(opts)
+			client, err := api.NewHTTPClient(httpOpts)
+			if err != nil {
+				return nil, err
+			}
+			if opts.HTTPClientWrapper != nil {
+				client = opts.HTTPClientWrapper(client)
+			}
+			return client, nil
 		}
 	}
 	httpClient, err := opts.HttpClient()

@@ -2,6 +2,13 @@
 
 `gh` is GitHub on the command line. It brings pull requests, issues, and other GitHub concepts to the terminal next to where you are already working with `git` and your code.
 
+> **This fork also builds `pgh`.** `pgh` preserves the pinned GitHub CLI command
+> surface while sending requests only to a repository access Broker. The Broker
+> holds the GitHub PAT and gives an Agent Host an opaque capability for one
+> repository and Policy Profile. It does not replace or overwrite the original
+> `gh` binary. Start with the [pgh operator guide](docs/pgh/README.md) and review
+> the [security boundary and limits](docs/pgh/architecture.md) before use.
+
 ![screenshot of gh pr status](https://user-images.githubusercontent.com/98482/84171218-327e7a80-aa40-11ea-8cd1-5177fc2d0e72.png)
 
 GitHub CLI is supported for users on GitHub.com, GitHub Enterprise Cloud, and GitHub Enterprise Server 2.20+ with support for macOS, Windows, and Linux.

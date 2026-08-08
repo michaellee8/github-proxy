@@ -23,18 +23,29 @@ import (
 var ssoHeader string
 var ssoURLRE = regexp.MustCompile(`\burl=([^;]+)`)
 
+// Options customizes clients produced by a Factory.
+type Options struct {
+	HTTPClientWrapper func(*http.Client) *http.Client
+}
+
 func New(appVersion string, invokingAgent string, cfgFunc func() (gh.Config, error), ios *iostreams.IOStreams, executablePath string, telemetryDisabler ghtelemetry.Disabler) *cmdutil.Factory {
+	return NewWithOptions(appVersion, invokingAgent, cfgFunc, ios, executablePath, telemetryDisabler, Options{})
+}
+
+// NewWithOptions constructs a command factory with optional client adaptations.
+func NewWithOptions(appVersion string, invokingAgent string, cfgFunc func() (gh.Config, error), ios *iostreams.IOStreams, executablePath string, telemetryDisabler ghtelemetry.Disabler, opts Options) *cmdutil.Factory {
 	f := &cmdutil.Factory{
-		AppVersion:     appVersion,
-		InvokingAgent:  invokingAgent,
-		Config:         cfgFunc,
-		ExecutablePath: executablePath,
+		AppVersion:        appVersion,
+		InvokingAgent:     invokingAgent,
+		Config:            cfgFunc,
+		ExecutablePath:    executablePath,
+		HTTPClientWrapper: opts.HTTPClientWrapper,
 	}
 
 	f.IOStreams = ios
-	f.HttpClient = HttpClientFunc(cfgFunc, ios, appVersion, invokingAgent, telemetryDisabler)
-	f.PlainHttpClient = plainHttpClientFunc(ios, appVersion, invokingAgent, telemetryDisabler)
-	f.ExternalHttpClient = externalHttpClientFunc(ios, appVersion)
+	f.HttpClient = withClientWrapper(HttpClientFunc(cfgFunc, ios, appVersion, invokingAgent, telemetryDisabler), opts.HTTPClientWrapper)
+	f.PlainHttpClient = withClientWrapper(plainHttpClientFunc(ios, appVersion, invokingAgent, telemetryDisabler), opts.HTTPClientWrapper)
+	f.ExternalHttpClient = withClientWrapper(externalHttpClientFunc(ios, appVersion), opts.HTTPClientWrapper)
 	f.GitClient = newGitClient(f) // Depends on IOStreams, and Executable
 	f.Remotes = remotesFunc(f)    // Depends on Config, and GitClient
 	f.BaseRepo = BaseRepoFunc(f.Remotes)
@@ -44,6 +55,19 @@ func New(appVersion string, invokingAgent string, cfgFunc func() (gh.Config, err
 	f.Branch = branchFunc(f)                 // Depends on GitClient
 
 	return f
+}
+
+func withClientWrapper(clientFunc func() (*http.Client, error), wrapper func(*http.Client) *http.Client) func() (*http.Client, error) {
+	if wrapper == nil {
+		return clientFunc
+	}
+	return func() (*http.Client, error) {
+		client, err := clientFunc()
+		if err != nil {
+			return nil, err
+		}
+		return wrapper(client), nil
+	}
 }
 
 // BaseRepoFunc requests a list of Remotes, and selects the first one.
