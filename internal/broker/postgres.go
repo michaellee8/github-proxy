@@ -22,6 +22,7 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+// NewPostgresStore constructs a store over an initialized PostgreSQL pool.
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
@@ -100,6 +101,7 @@ ON CONFLICT (name) DO UPDATE SET
 	return nil
 }
 
+// CredentialByName loads a named encrypted Upstream Credential.
 func (s *PostgresStore) CredentialByName(ctx context.Context, name string) (StoredCredential, error) {
 	var credential StoredCredential
 	err := s.pool.QueryRow(ctx, `
@@ -119,6 +121,7 @@ WHERE name = $1`, name).Scan(
 	return credential, nil
 }
 
+// CreateCapability stores a capability without changing existing repository bindings.
 func (s *PostgresStore) CreateCapability(ctx context.Context, capability StoredCapability) error {
 	grants, err := json.Marshal(capability.Policy.Grants)
 	if err != nil {
@@ -132,14 +135,21 @@ func (s *PostgresStore) CreateCapability(ctx context.Context, capability StoredC
 	if _, err := tx.Exec(ctx, `
 INSERT INTO pgh_repositories (id, owner_name, repository_name, default_branch)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (id) DO UPDATE SET
-    owner_name = EXCLUDED.owner_name,
-    repository_name = EXCLUDED.repository_name,
-    default_branch = EXCLUDED.default_branch,
-    updated_at = now()`,
+ON CONFLICT (id) DO NOTHING`,
 		capability.Repository.ID, capability.Repository.Owner, capability.Repository.Name, capability.Repository.DefaultBranch,
 	); err != nil {
 		return fmt.Errorf("store target repository: %w", err)
+	}
+	var storedOwner, storedName, storedDefaultBranch string
+	if err := tx.QueryRow(ctx, `
+SELECT owner_name, repository_name, default_branch
+FROM pgh_repositories
+WHERE id = $1
+FOR SHARE`, capability.Repository.ID).Scan(&storedOwner, &storedName, &storedDefaultBranch); err != nil {
+		return fmt.Errorf("verify target repository: %w", err)
+	}
+	if storedOwner != capability.Repository.Owner || storedName != capability.Repository.Name || storedDefaultBranch != capability.Repository.DefaultBranch {
+		return errors.New("repository ID is already bound to different immutable settings")
 	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO pgh_capabilities (
@@ -157,6 +167,7 @@ INSERT INTO pgh_capabilities (
 	return nil
 }
 
+// CapabilityBySelector loads the capability material needed for authentication.
 func (s *PostgresStore) CapabilityBySelector(ctx context.Context, selector string) (StoredCapability, error) {
 	var capability StoredCapability
 	var grants []byte

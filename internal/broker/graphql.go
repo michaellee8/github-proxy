@@ -68,13 +68,34 @@ var graphQLRepositoryFields = map[string]bool{
 	"name": true, "nameWithOwner": true, "nodes": true, "number": true,
 	"object": true, "oid": true, "owner": true,
 	"pageInfo": true, "potentialMergeCommit": true, "primaryLanguage": true, "progressPercentage": true, "pullRequest": true, "pullRequests": true, "pullRequestTemplates": true, "pushedAt": true,
-	"rebaseMergeAllowed": true, "refs": true, "release": true, "releases": true, "reviewDecision": true, "reviewRequests": true, "reviews": true,
-	"repository": true,
-	"size":       true, "squashMergeAllowed": true, "sshUrl": true, "startCursor": true, "startedAt": true, "state": true, "stateReason": true, "status": true, "statusCheckRollup": true,
+	"rebaseMergeAllowed": true, "refs": true, "release": true, "releases": true, "requestedReviewer": true, "reviewDecision": true, "reviewRequests": true, "reviews": true,
+	"size": true, "squashMergeAllowed": true, "sshUrl": true, "startCursor": true, "startedAt": true, "state": true, "stateReason": true, "status": true, "statusCheckRollup": true,
 	"tag": true, "target": true, "text": true, "title": true, "totalCount": true,
 	"updatedAt": true, "url": true,
 	"viewerCanAdminister": true, "viewerCanCreateProjects": true, "viewerCanSubscribe": true, "viewerPermission": true, "viewerSubscription": true, "visibility": true,
 	"workflowName": true,
+}
+
+// Identity-bearing fields leave repository provenance and enter a deliberately
+// shallow projection. This prevents an issue's author, owner, or assignee from
+// becoming a path back into that identity's global graph.
+var graphQLIdentityBoundaries = map[string]bool{
+	"assignees": true, "author": true, "authors": true, "owner": true,
+	"requestedReviewer": true, "reviewRequests": true,
+}
+
+var graphQLIdentityFields = map[string]bool{
+	"__typename": true, "avatarUrl": true,
+	"edges": true, "endCursor": true,
+	"hasNextPage": true, "hasPreviousPage": true,
+	"id": true, "isBot": true, "isDisabled": true,
+	"login": true,
+	"name":  true, "nodes": true,
+	"pageInfo":          true,
+	"requestedReviewer": true,
+	"startCursor":       true,
+	"totalCount":        true,
+	"url":               true,
 }
 
 func (h *handler) serveGraphQL(w http.ResponseWriter, req *http.Request, session Session) {
@@ -176,12 +197,7 @@ func validGraphQLOperation(document *ast.QueryDocument, operation *ast.Operation
 		if !graphQLVariable(owner, family.ownerVariable) || !graphQLVariable(name, family.nameVariable) {
 			return false
 		}
-	}
-	if containsGraphQLDeniedField(operation.SelectionSet) {
-		return false
-	}
-	for _, fragment := range document.Fragments {
-		if containsGraphQLDeniedField(fragment.SelectionSet) {
+		if !validGraphQLSelections(document, field.SelectionSet, false, make(map[string]bool)) {
 			return false
 		}
 	}
@@ -192,23 +208,47 @@ func graphQLVariable(argument *ast.Argument, expected string) bool {
 	return argument != nil && argument.Value != nil && argument.Value.Kind == ast.Variable && argument.Value.Raw == expected
 }
 
-func containsGraphQLDeniedField(selections ast.SelectionSet) bool {
+func validGraphQLSelections(document *ast.QueryDocument, selections ast.SelectionSet, identityScope bool, visiting map[string]bool) bool {
 	for _, selection := range selections {
 		switch value := selection.(type) {
 		case *ast.Field:
 			if !graphQLRepositoryFields[value.Name] {
-				return true
+				return false
 			}
-			if containsGraphQLDeniedField(value.SelectionSet) {
-				return true
+			if identityScope && !graphQLIdentityFields[value.Name] {
+				return false
+			}
+			nextIdentityScope := identityScope || graphQLIdentityBoundaries[value.Name]
+			if !validGraphQLSelections(document, value.SelectionSet, nextIdentityScope, visiting) {
+				return false
 			}
 		case *ast.InlineFragment:
-			if containsGraphQLDeniedField(value.SelectionSet) {
-				return true
+			if !validGraphQLSelections(document, value.SelectionSet, identityScope, visiting) {
+				return false
 			}
+		case *ast.FragmentSpread:
+			fragment := document.Fragments.ForName(value.Name)
+			if fragment == nil {
+				return false
+			}
+			key := fragment.Name
+			if identityScope {
+				key += ":identity"
+			}
+			if visiting[key] {
+				return false
+			}
+			visiting[key] = true
+			valid := validGraphQLSelections(document, fragment.SelectionSet, identityScope, visiting)
+			delete(visiting, key)
+			if !valid {
+				return false
+			}
+		default:
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func graphQLEndpoint(apiBaseURL string) (*url.URL, error) {

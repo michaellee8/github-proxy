@@ -104,8 +104,15 @@ func (t *brokerOnlyTransport) RoundTrip(request *http.Request) (*http.Response, 
 	if t.brokerHost == "" {
 		return nil, fmt.Errorf("pgh refuses request to %s; configure a broker host with PGH_HOST", requestHost)
 	}
+	if request.URL.Scheme != "https" {
+		return nil, fmt.Errorf("pgh refuses insecure request to %s; broker requests require HTTPS", requestHost)
+	}
 	if requestHost != t.brokerHost {
 		return nil, fmt.Errorf("pgh refuses request to %s; configured broker host is %s", requestHost, t.brokerHost)
+	}
+	requestAuthority := strings.ToLower(strings.TrimSuffix(request.URL.Host, "."))
+	if request.URL.User != nil || requestAuthority != t.brokerHost {
+		return nil, fmt.Errorf("pgh refuses request authority %s; configured broker host is %s", requestAuthority, t.brokerHost)
 	}
 	return t.base.RoundTrip(request)
 }

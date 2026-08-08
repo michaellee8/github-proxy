@@ -23,21 +23,29 @@ directly to PostgreSQL. There is no administrative HTTP API.
 
 - A Capability Token resolves to one immutable GitHub repository ID, canonical
   owner/name, one stored Upstream Credential, and one versioned Policy Profile.
+  Issuing another capability cannot change an existing repository row.
 - Only a SHA-256 hash of the capability secret is stored. Tokens can expire and
   can be revoked immediately.
 - Upstream Credentials are encrypted with AES-256-GCM and a named key before
   storage. Plaintext is recovered only for an authorized upstream request.
 - REST requests must use a registered method and repository-relative path. The
   Broker rebuilds the upstream URL from trusted repository data and replaces
-  client authorization headers.
+  client authorization headers. REST Git-ref writes use the same branch and tag
+  policy as Git smart HTTP, ref deletion is never registered, and pull request
+  heads cannot name another repository.
 - GraphQL documents are parsed with size and token limits. Only registered
   operation families rooted at the Target Repository are accepted, and trusted
   owner/name variables replace client values. Nested selections must also use a
-  reviewed field allowlist that blocks traversal into the wider GitHub graph.
+  reviewed field allowlist. Author, owner, assignee, and review-request paths
+  enter a restricted identity projection that blocks traversal back into the
+  wider GitHub graph.
 - Git smart HTTP is bound to the Target Repository. Push authorization parses
   receive-pack ref commands, rejects ref deletion, and applies branch and tag
   policy before streaming pack data.
 - Git LFS operations use the same repository binding and Git write policy.
+- `pgh` sends capability-bearing HTTP only over HTTPS to the exact configured
+  broker authority. Alternate ports, redirects to another authority, and direct
+  GitHub destinations fail closed.
 
 ## Deliberate limits
 
@@ -46,8 +54,8 @@ make autonomous code changes safe by itself.
 
 - REST authorization evaluates registered methods and normalized paths, plus
   ref-bearing bodies for workflow dispatch, content writes, deployments, and
-  releases. It does not model every field or query parameter accepted by every
-  GitHub endpoint.
+  releases, REST Git-ref paths and bodies, and pull request heads. It does not
+  model every field or query parameter accepted by every GitHub endpoint.
 - GraphQL is intentionally incomplete. Unregistered operation names, global
   node lookups, mutations, and newly used fields fail closed until their scope
   and identifier provenance are reviewed.

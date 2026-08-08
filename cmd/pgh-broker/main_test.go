@@ -24,7 +24,7 @@ func TestParseKeyringRejectsMalformedKeys(t *testing.T) {
 	for _, value := range []string{"", "missing-separator", "primary:not-base64", "primary:" + base64.StdEncoding.EncodeToString([]byte("short"))} {
 		t.Run(strings.ReplaceAll(value, "/", "_"), func(t *testing.T) {
 			_, err := parseKeyring(value)
-			assert.Error(t, err)
+			require.Error(t, err)
 		})
 	}
 }

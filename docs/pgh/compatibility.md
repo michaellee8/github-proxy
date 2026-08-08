@@ -4,17 +4,20 @@ This matrix describes Policy Profile `developer` version 1. Compatibility is
 deny-by-default: an unlisted REST path, GraphQL operation name, Git service, or
 LFS operation is rejected before reaching GitHub.
 
+The rows below summarize individually registered method/path patterns. They do
+not grant every current or future endpoint beneath a resource prefix.
+
 ## REST API
 
 | Resource under `/repos/OWNER/REPO` | Read | Default mutation | Additional grant | Notes |
 | --- | --- | --- | --- | --- |
 | repository metadata | yes | no | none | Repository root accepts `GET` and `HEAD` only. |
-| issues, pulls, labels, milestones | yes | create/update | `objects.delete` for `DELETE` | Includes pull request merge routes. |
+| issues, pulls, labels, milestones | yes | registered create/update routes | `objects.delete` for registered `DELETE` routes | Includes pull request merge routes. Issue transfer, sub-issue/dependency relationships, pull update-branch, and unregistered routes are denied. Pull request heads must belong to the Target Repository. |
 | Actions | yes | no | `actions.write` | Secrets and variables remain hard denied. |
 | check runs, check suites, statuses | yes | no | `checks.write` | |
-| commits, contents, Git data | yes | no | `contents.write` | Content branch fields are checked against Git push policy. |
+| commits, contents, Git data | yes | no | `contents.write` | Content branch fields and REST Git-ref writes are checked against Git push policy. Only branch and tag refs are accepted, and REST ref deletion is always denied. |
 | deployments | yes | no | `deployments.write` | Deployment refs are checked against Git push policy. |
-| releases | yes | no | `releases.write` | Creating a release also requires tag authority. |
+| releases | yes | no | `releases.write` | Creating a release, or editing its tag or target, also requires tag authority and ref-policy approval. |
 | traffic | yes | no | none | |
 | collaborators, environments, hooks, invitations, keys, rulesets, security administration | no | no | none | Hard denied. |
 | account, organization, search, and other global routes | no | no | none | Requests must be rooted at the Target Repository. |
@@ -22,7 +25,8 @@ LFS operation is rejected before reaching GitHub.
 Known grant names are `actions.write`, `checks.write`, `contents.write`,
 `deployments.write`, `objects.delete`, and `releases.write`.
 Every `DELETE` request also requires `objects.delete`, even when its resource
-has a separate write grant.
+has a separate write grant. This grant never enables an unregistered route or
+Git-ref deletion.
 
 ## GraphQL API
 
@@ -74,7 +78,7 @@ creation, even when `--git-push=none`.
 | issue/PR commands that use only listed REST routes | expected to work, verify per command |
 | commands that use an unregistered GraphQL operation | denied |
 | account, auth mutation, org, gist, project, codespace, SSH/GPG key, secret, variable, and extension network workflows | denied or unsupported |
-| arbitrary `--hostname` or direct GitHub destination | rejected by the pgh client transport |
+| non-HTTPS, alternate-port, arbitrary `--hostname`, redirect, or direct GitHub destination | rejected by the pgh client transport |
 
 Keep live compatibility tests tied to the pinned `gh` release. A new upstream
 release can change an internal command from REST to GraphQL without changing its

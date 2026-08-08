@@ -28,10 +28,12 @@ type AdminService struct {
 	now    func() time.Time
 }
 
+// NewAdminService constructs the offline credential and capability service.
 func NewAdminService(store Store, cipher *broker.CredentialCipher, random io.Reader, now func() time.Time) *AdminService {
 	return &AdminService{store: store, cipher: cipher, random: random, now: now}
 }
 
+// PutCredential encrypts and stores an upstream GitHub credential.
 func (s *AdminService) PutCredential(ctx context.Context, request PutCredentialRequest) error {
 	if s.store == nil || s.cipher == nil || s.random == nil || request.Name == "" || request.UpstreamHost == "" || len(request.Token) == 0 {
 		return errors.New("complete upstream credential settings are required")
@@ -58,11 +60,13 @@ func (s *AdminService) PutCredential(ctx context.Context, request PutCredentialR
 	return s.store.PutCredential(ctx, credential)
 }
 
+// Issue creates a repository-bound capability and returns its token once.
 func (s *AdminService) Issue(ctx context.Context, request broker.IssueRequest) (broker.IssuedCapability, error) {
 	issuer := broker.NewCapabilityIssuer(s.store, s.random, s.now)
 	return issuer.Issue(ctx, request)
 }
 
+// Revoke permanently disables a repository capability.
 func (s *AdminService) Revoke(ctx context.Context, id string) error {
 	if s.store == nil || s.now == nil {
 		return errors.New("admin service is unavailable")

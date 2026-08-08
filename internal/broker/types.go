@@ -40,9 +40,12 @@ type Policy struct {
 }
 
 const (
-	GitPushNone       = "none"
+	// GitPushNone denies all branch updates.
+	GitPushNone = "none"
+	// GitPushNonDefault permits branch updates except to the bound default branch.
 	GitPushNonDefault = "non-default"
-	GitPushAll        = "all"
+	// GitPushAll permits updates to every branch in the bound repository.
+	GitPushAll = "all"
 )
 
 // GitPolicy grants ref-level authority for Git smart HTTP.

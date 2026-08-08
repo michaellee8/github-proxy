@@ -111,7 +111,7 @@ func TestExpiredAndRevokedCapabilitiesAreRejected(t *testing.T) {
 			}
 			authority := NewCapabilityAuthority(store, cipher, func() time.Time { return now })
 			_, err := authority.Resolve(context.Background(), "pgh_pat_selector.secret")
-			assert.ErrorIs(t, err, ErrCapabilityInvalid)
+			require.ErrorIs(t, err, ErrCapabilityInvalid)
 		})
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cli/cli/v2/internal/broker"
+	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/spf13/cobra"
 )
 
@@ -100,23 +101,23 @@ func newCapabilityCommand(service Service) *cobra.Command {
 			}
 			owner, name, ok := strings.Cut(repo, "/")
 			if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-				return errors.New("repo must be exactly OWNER/NAME")
+				return cmdutil.FlagErrorf("repo must be exactly OWNER/NAME")
 			}
 			policyGrants := make(map[string]bool, len(grants))
 			for _, grant := range grants {
 				if !broker.IsKnownGrant(grant) {
-					return fmt.Errorf("unknown policy grant %q", grant)
+					return cmdutil.FlagErrorf("unknown policy grant %q", grant)
 				}
 				policyGrants[grant] = true
 			}
 			if gitPush != broker.GitPushNone && gitPush != broker.GitPushNonDefault && gitPush != broker.GitPushAll {
-				return errors.New("git-push must be none, non-default, or all")
+				return cmdutil.FlagErrorf("git-push must be none, non-default, or all")
 			}
 			var expiresAt *time.Time
 			if expiresIn != "" {
 				duration, err := time.ParseDuration(expiresIn)
 				if err != nil || duration <= 0 {
-					return errors.New("expires-in must be a positive duration")
+					return cmdutil.FlagErrorf("expires-in must be a positive duration")
 				}
 				value := time.Now().Add(duration)
 				expiresAt = &value

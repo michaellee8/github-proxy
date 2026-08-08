@@ -32,7 +32,7 @@ func TestBrokerForwardsRegisteredRepositoryGraphQLQuery(t *testing.T) {
 	})
 
 	body := `{
-		"query":"query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { name issues(first: 10) { nodes { number } } } }",
+		"query":"query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { name issues(first: 10) { nodes { number author { login } } } } }",
 		"variables":{"owner":"other","name":"private"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/graphql", strings.NewReader(body))
@@ -162,6 +162,20 @@ func TestBrokerRejectsUnscopedGraphQLRequests(t *testing.T) {
 			name:       "repository owner graph traversal",
 			method:     http.MethodPost,
 			body:       `{"query":"query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { owner { repositories(first: 1) { nodes { name } } } } }"}`,
+			wantStatus: http.StatusForbidden,
+			wantCode:   "PGH_POLICY_DENIED",
+		},
+		{
+			name:       "nested repository traversal",
+			method:     http.MethodPost,
+			body:       `{"query":"query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { owner { repository(name: \"outside\") { name } } } }"}`,
+			wantStatus: http.StatusForbidden,
+			wantCode:   "PGH_POLICY_DENIED",
+		},
+		{
+			name:       "issue author global issue traversal",
+			method:     http.MethodPost,
+			body:       `{"query":"query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { issues(first: 1) { nodes { author { ... on User { issues(first: 10) { nodes { title body } } } } } } } }"}`,
 			wantStatus: http.StatusForbidden,
 			wantCode:   "PGH_POLICY_DENIED",
 		},

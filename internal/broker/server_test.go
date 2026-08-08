@@ -130,6 +130,10 @@ func TestBrokerAppliesRegisteredRESTPolicy(t *testing.T) {
 		{name: "comment deletion needs grant", method: http.MethodDelete, path: "/api/v3/repos/michaellee8/github-proxy/issues/comments/12", wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
 		{name: "comment deletion granted", method: http.MethodDelete, path: "/api/v3/repos/michaellee8/github-proxy/issues/comments/12", grants: []string{"objects.delete"}, wantStatus: http.StatusCreated, wantCall: true},
 		{name: "secrets are permanently denied", method: http.MethodGet, path: "/api/v3/repos/michaellee8/github-proxy/actions/secrets", grants: []string{"actions.write", "objects.delete"}, wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
+		{name: "issue transfer is permanently denied", method: http.MethodPost, path: "/api/v3/repos/michaellee8/github-proxy/issues/12/transfer", body: `{"new_owner":"outside","new_repo":"private"}`, wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
+		{name: "pull update branch is permanently denied", method: http.MethodPut, path: "/api/v3/repos/michaellee8/github-proxy/pulls/12/update-branch", body: `{}`, wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
+		{name: "sub-issue relationships are permanently denied", method: http.MethodPost, path: "/api/v3/repos/michaellee8/github-proxy/issues/12/sub_issues", body: `{"sub_issue_id":42}`, wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
+		{name: "unregistered issue mutation is denied", method: http.MethodPost, path: "/api/v3/repos/michaellee8/github-proxy/issues/12/future-global-write", body: `{}`, wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
 		{name: "encoded separator is rejected", method: http.MethodGet, path: "/api/v3/repos/michaellee8/github-proxy/issues%2F1", wantStatus: http.StatusBadRequest, wantCode: "PGH_PATH_INVALID"},
 	}
 
@@ -198,6 +202,56 @@ func TestBrokerValidatesRESTRefFieldsAgainstGitPolicy(t *testing.T) {
 			name: "release tag needs tag authority", method: http.MethodPost,
 			path: "/api/v3/repos/michaellee8/github-proxy/releases", body: `{"tag_name":"v1","target_commitish":"agent-work"}`,
 			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"releases.write": true}, Git: GitPolicy{Push: GitPushAll}}, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "release edit cannot retarget without tag authority", method: http.MethodPatch,
+			path: "/api/v3/repos/michaellee8/github-proxy/releases/42", body: `{"tag_name":"v2","target_commitish":"agent-work"}`,
+			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"releases.write": true}, Git: GitPolicy{Push: GitPushAll}}, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "release metadata edit does not need tag authority", method: http.MethodPatch,
+			path: "/api/v3/repos/michaellee8/github-proxy/releases/42", body: `{"name":"renamed"}`,
+			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"releases.write": true}, Git: GitPolicy{Push: GitPushNone}}, wantStatus: http.StatusCreated,
+		},
+		{
+			name: "REST ref update cannot write default branch", method: http.MethodPatch,
+			path: "/api/v3/repos/michaellee8/github-proxy/git/refs/heads/main", body: `{"sha":"1111111111111111111111111111111111111111"}`,
+			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"contents.write": true}, Git: GitPolicy{Push: GitPushNonDefault}}, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "REST ref update can write non-default branch", method: http.MethodPatch,
+			path: "/api/v3/repos/michaellee8/github-proxy/git/refs/heads/agent-work", body: `{"sha":"1111111111111111111111111111111111111111"}`,
+			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"contents.write": true}, Git: GitPolicy{Push: GitPushNonDefault}}, wantStatus: http.StatusCreated,
+		},
+		{
+			name: "REST tag creation needs tag authority", method: http.MethodPost,
+			path: "/api/v3/repos/michaellee8/github-proxy/git/refs", body: `{"ref":"refs/tags/v1","sha":"1111111111111111111111111111111111111111"}`,
+			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"contents.write": true}, Git: GitPolicy{Push: GitPushAll}}, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "REST ref deletion is always denied", method: http.MethodDelete,
+			path:   "/api/v3/repos/michaellee8/github-proxy/git/refs/heads/agent-work",
+			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"contents.write": true, "objects.delete": true}, Git: GitPolicy{Push: GitPushAll, Tags: true}}, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "REST non-branch ref creation is denied", method: http.MethodPost,
+			path: "/api/v3/repos/michaellee8/github-proxy/git/refs", body: `{"ref":"refs/notes/agent","sha":"1111111111111111111111111111111111111111"}`,
+			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"contents.write": true}, Git: GitPolicy{Push: GitPushAll, Tags: true}}, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "deployment status does not reinterpret status as a ref", method: http.MethodPost,
+			path: "/api/v3/repos/michaellee8/github-proxy/deployments/42/statuses", body: `{"state":"success"}`,
+			policy: Policy{Name: "developer", Version: 1, Grants: map[string]bool{"deployments.write": true}, Git: GitPolicy{Push: GitPushNone}}, wantStatus: http.StatusCreated,
+		},
+		{
+			name: "pull request head cannot name an outside repository", method: http.MethodPost,
+			path: "/api/v3/repos/michaellee8/github-proxy/pulls", body: `{"title":"outside","head":"outside:branch","base":"main"}`,
+			policy: Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushAll}}, wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "pull request head can name a branch in the bound repository", method: http.MethodPost,
+			path: "/api/v3/repos/michaellee8/github-proxy/pulls", body: `{"title":"inside","head":"agent-work","base":"main"}`,
+			policy: Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}}, wantStatus: http.StatusCreated,
 		},
 	}
 

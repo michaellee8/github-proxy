@@ -53,6 +53,13 @@ func TestPostgresAdminToBrokerCapabilityLifecycle(t *testing.T) {
 	token := strings.TrimSpace(stdout.String())
 	require.True(t, strings.HasPrefix(token, "pgh_pat_"))
 
+	_, err = service.Issue(ctx, broker.IssueRequest{
+		CredentialName: "work",
+		Repository:     broker.Repository{ID: 1326468465, Owner: "outside", Name: "private", DefaultBranch: "trunk"},
+		Policy:         broker.Policy{Name: "developer", Version: 1, Git: broker.GitPolicy{Push: broker.GitPushNone}},
+	})
+	require.Error(t, err)
+
 	authority := broker.NewCapabilityAuthority(store, cipher, time.Now)
 	handler := broker.NewHandler(broker.HandlerOptions{Authority: authority})
 	req := httptest.NewRequest(http.MethodGet, "/_pgh/v1/context", nil)

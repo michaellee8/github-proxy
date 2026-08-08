@@ -142,10 +142,12 @@ type CapabilityIssuer struct {
 	now    func() time.Time
 }
 
+// NewCapabilityIssuer constructs an issuer over the privileged persistence boundary.
 func NewCapabilityIssuer(store CapabilityStore, random io.Reader, now func() time.Time) *CapabilityIssuer {
 	return &CapabilityIssuer{store: store, random: random, now: now}
 }
 
+// Issue creates a repository-bound capability and returns its bearer token once.
 func (i *CapabilityIssuer) Issue(ctx context.Context, request IssueRequest) (IssuedCapability, error) {
 	if i.store == nil || i.random == nil || request.CredentialName == "" || request.Repository.ID <= 0 || request.Repository.Owner == "" || request.Repository.Name == "" || request.Policy.Name == "" || request.Policy.Version <= 0 {
 		return IssuedCapability{}, errors.New("complete credential, repository, and policy settings are required")
@@ -181,6 +183,7 @@ type capabilityAuthority struct {
 	now    func() time.Time
 }
 
+// NewCapabilityAuthority constructs the request-time capability resolver.
 func NewCapabilityAuthority(store CapabilityStore, cipher *CredentialCipher, now func() time.Time) Authority {
 	return &capabilityAuthority{store: store, cipher: cipher, now: now}
 }

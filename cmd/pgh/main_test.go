@@ -139,6 +139,26 @@ func TestPGHEnvironmentPolicy(t *testing.T) {
 			wantStderrContains: "pgh refuses request to api.github.com; configured broker host is broker.example.com",
 		},
 		{
+			name: "broker capability requires HTTPS",
+			environment: map[string]string{
+				"PGH_HOST":  "broker.example.com",
+				"PGH_TOKEN": "pgh-capability",
+			},
+			args:               []string{"api", "http://broker.example.com/user"},
+			wantExitCode:       1,
+			wantStderrContains: "pgh refuses insecure request to broker.example.com",
+		},
+		{
+			name: "alternate broker port is rejected",
+			environment: map[string]string{
+				"PGH_HOST":  "broker.example.com",
+				"PGH_TOKEN": "pgh-capability",
+			},
+			args:               []string{"api", "https://broker.example.com:8443/user"},
+			wantExitCode:       1,
+			wantStderrContains: "pgh refuses request authority broker.example.com:8443; configured broker host is broker.example.com",
+		},
+		{
 			name: "capability is not resolved for GitHub",
 			environment: map[string]string{
 				"PGH_HOST":  "broker.example.com",
