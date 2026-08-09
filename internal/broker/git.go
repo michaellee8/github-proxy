@@ -126,7 +126,7 @@ func gitUpstreamURL(host string, requestURL *url.URL) (*url.URL, error) {
 func readReceiveCommands(body io.Reader) ([]byte, []gitRefCommand, error) {
 	var prefix bytes.Buffer
 	commands := make([]gitRefCommand, 0, 1)
-	for len(commands) < maxGitCommands {
+	for range maxGitCommands {
 		header := make([]byte, 4)
 		if _, err := io.ReadFull(body, header); err != nil {
 			return nil, nil, err
@@ -153,6 +153,9 @@ func readReceiveCommands(body io.Reader) ([]byte, []gitRefCommand, error) {
 		commandText := strings.TrimSuffix(string(payload), "\n")
 		commandText, _, _ = strings.Cut(commandText, "\x00")
 		fields := strings.Fields(commandText)
+		if len(fields) == 2 && fields[0] == "shallow" && validGitOID(fields[1]) && len(commands) == 0 {
+			continue
+		}
 		if len(fields) != 3 || !validGitOID(fields[0]) || !validGitOID(fields[1]) || !strings.HasPrefix(fields[2], "refs/") {
 			return nil, nil, errors.New("invalid receive-pack ref command")
 		}

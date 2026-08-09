@@ -34,14 +34,20 @@ The registered query families are `RepositoryInfo`, `IssueList`,
 `IssueByNumber`, `IssueNodeID`, `IssueRepositoryInfo`, `IssueTemplates`,
 `LabelList`, `PullRequestList`, `PullRequestByNumber`,
 `PullRequestForBranch`, `PullRequestTemplates`, `RepositoryIssueTypes`,
-`RepositoryLabelList`, and `RepositoryMilestoneList`. Each document must
-contain one named repository-root query with the variables registered for that
-family. The Broker replaces repository variables with the Target Repository.
+`RepositoryLabelList`, `RepositoryMilestoneList`, and
+`RepositoryReleaseList`. Each document must contain one named repository-root
+query with the variables registered for that family. The Broker replaces
+repository variables with the Target Repository.
+
+The only allowed introspection is the exact variable-free `Release_fields`
+feature probe emitted by the pinned `gh` release:
+`Release: __type(name: "Release") { fields { name } }`. Altered aliases,
+directives, variables, or additional selections on that probe are denied.
 
 Nested selections use a recursive field allowlist. This prevents traversal from
 the repository into owner repositories, parent or fork repositories,
 collaborators, environments, rules, security administration, and other global
-graph data. Introspection, anonymous operations, multiple operations,
+graph data. Other introspection, anonymous operations, multiple operations,
 mutations, search, global node access, unregistered names, and unreviewed fields
 are denied.
 
@@ -71,15 +77,35 @@ creation, even when `--git-push=none`.
 
 ## pgh command status
 
-| Command shape | Status |
+The REST and GraphQL tables above describe authorization policy, not blanket CLI
+compatibility. Only the following pinned `gh` v2.97.0 command shapes are declared
+compatible. Each row runs through the real `pgh` command tree and Broker against
+`api.github.com` in `internal/pghcmd/live_integration_test.go`.
+
+| Command shape | Live result |
 | --- | --- |
-| `pgh api repos/OWNER/REPO/...` using a listed REST operation | supported |
-| `pgh api graphql` with a registered repository-read family | supported |
-| issue/PR commands that use only listed REST routes | expected to work, verify per command |
+| `pgh repo view OWNER/REPO` | pass |
+| `pgh repo view OWNER/REPO --json nameWithOwner` | pass |
+| `pgh api repos/OWNER/REPO` | pass |
+| `pgh api graphql` with one registered query family | pass; every registered family is forwarded live, with expected GitHub not-found errors accepted only for missing fixture numbers |
+| `pgh issue list --repo OWNER/REPO --json number,title` | pass |
+| `pgh pr list --repo OWNER/REPO --json number,title` | pass |
+| `pgh label list --repo OWNER/REPO --json name` | pass |
+| `pgh release list --repo OWNER/REPO --json name,tagName` | pass |
+| `pgh workflow list --repo OWNER/REPO --json id,name,path,state` | pass |
+| `pgh run list --repo OWNER/REPO --json databaseId,workflowName,status` | pass |
 | commands that use an unregistered GraphQL operation | denied |
 | account, auth mutation, org, gist, project, codespace, SSH/GPG key, secret, variable, and extension network workflows | denied or unsupported |
 | non-HTTPS, alternate-port, arbitrary `--hostname`, redirect, or direct GitHub destination | rejected by the pgh client transport |
 
-Keep live compatibility tests tied to the pinned `gh` release. A new upstream
-release can change an internal command from REST to GraphQL without changing its
-CLI syntax.
+Git HTTPS live checks run real `git ls-remote`, shallow clone, and fetch through
+the Broker. Explicitly enabled write checks create and remove a non-default
+branch and a tag through GitHub's receive-pack endpoint, then verify that deletion
+through the Broker is denied. LFS policy has unit coverage but is not yet declared
+live-endpoint compatible.
+
+Run the read-only matrix with `scripts/test-pgh-live.sh`. Temporary-ref tests
+require both `PGH_LIVE_ALLOW_WRITES=1` and `PGH_LIVE_DEFAULT_BRANCH`, and first
+verify that the configured default branch ref exists. Keep these tests tied to
+the pinned `gh` release: a new upstream release can change an internal command
+from REST to GraphQL without changing its CLI syntax.

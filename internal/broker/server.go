@@ -80,7 +80,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func capabilityToken(req *http.Request) (string, bool) {
-	if token, ok := bearerToken(req.Header.Get("Authorization")); ok {
+	if token, ok := authorizationToken(req.Header.Get("Authorization")); ok {
 		return token, true
 	}
 	username, password, ok := req.BasicAuth()
@@ -171,9 +171,10 @@ func (h *handler) serveREST(w http.ResponseWriter, req *http.Request, session Se
 	_, _ = io.Copy(w, response.Body)
 }
 
-func bearerToken(value string) (string, bool) {
+func authorizationToken(value string) (string, bool) {
 	scheme, token, ok := strings.Cut(value, " ")
-	if !ok || !strings.EqualFold(scheme, "bearer") || token == "" || strings.ContainsAny(token, " \t\r\n") {
+	if !ok || (!strings.EqualFold(scheme, "bearer") && !strings.EqualFold(scheme, "token")) ||
+		token == "" || strings.ContainsAny(token, " \t\r\n") {
 		return "", false
 	}
 	return token, true

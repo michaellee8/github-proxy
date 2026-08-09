@@ -61,6 +61,17 @@ func TestBrokerRejectsMissingCapability(t *testing.T) {
 	assert.JSONEq(t, `{"message":"missing capability token","code":"PGH_AUTH_REQUIRED"}`, res.Body.String())
 }
 
+func TestBrokerAcceptsGitHubCLITokenScheme(t *testing.T) {
+	handler := NewHandler(HandlerOptions{Authority: testAuthority(t)})
+	req := httptest.NewRequest(http.MethodGet, "/_pgh/v1/context", nil)
+	req.Header.Set("Authorization", "token pgh_pat_selector_secret")
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	require.Equal(t, http.StatusOK, res.Code)
+}
+
 func TestBrokerHealthDoesNotRequireCapability(t *testing.T) {
 	handler := NewHandler(HandlerOptions{Authority: testAuthority(t)})
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -123,6 +134,7 @@ func TestBrokerAppliesRegisteredRESTPolicy(t *testing.T) {
 		wantCode   string
 		wantCall   bool
 	}{
+		{name: "repository readme", method: http.MethodGet, path: "/api/v3/repos/michaellee8/github-proxy/readme", wantStatus: http.StatusCreated, wantCall: true},
 		{name: "developer creates issue", method: http.MethodPost, path: "/api/v3/repos/michaellee8/github-proxy/issues", body: `{"title":"scoped"}`, wantStatus: http.StatusCreated, wantCall: true},
 		{name: "developer reads actions", method: http.MethodGet, path: "/api/v3/repos/michaellee8/github-proxy/actions/runs", wantStatus: http.StatusCreated, wantCall: true},
 		{name: "workflow dispatch needs grant", method: http.MethodPost, path: "/api/v3/repos/michaellee8/github-proxy/actions/workflows/test.yml/dispatches", wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},

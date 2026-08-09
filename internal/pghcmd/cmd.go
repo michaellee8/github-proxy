@@ -17,14 +17,28 @@ import (
 
 // Main configures the isolated pgh runtime and runs the upstream command tree.
 func Main() int {
+	return mainWithOptions(mainOptions{})
+}
+
+type mainOptions struct {
+	HTTPClientWrapper func(*http.Client) *http.Client
+}
+
+func mainWithOptions(opts mainOptions) int {
 	host, err := prepareEnvironment()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	clientWrapper := brokerOnlyClientWrapper(host)
+	if opts.HTTPClientWrapper != nil {
+		clientWrapper = func(client *http.Client) *http.Client {
+			return brokerOnlyClientWrapper(host)(opts.HTTPClientWrapper(client))
+		}
+	}
 	return int(ghcmd.MainWithOptions(ghcmd.MainOptions{
 		CommandName:       "pgh",
-		HTTPClientWrapper: brokerOnlyClientWrapper(host),
+		HTTPClientWrapper: clientWrapper,
 		CommandValidator:  brokerOnlyCommandValidator(host),
 	}))
 }

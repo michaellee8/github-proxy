@@ -79,6 +79,75 @@ func TestBrokerSupportsPinnedGHRepositoryReadFamilies(t *testing.T) {
 	assert.Equal(t, "github-proxy", variables["repo"])
 }
 
+func TestBrokerSupportsPinnedGHRepositoryIssueTypesQuery(t *testing.T) {
+	handler := NewHandler(HandlerOptions{
+		Authority: testAuthority(t),
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"data":{"repository":{"issueTypes":{"nodes":[]}}}}`)),
+			}, nil
+		}),
+	})
+	body := `{
+		"query":"query RepositoryIssueTypes($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { issueTypes(first: 50) { nodes { id name description color } } } }",
+		"variables":{"owner":"outside","name":"private"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/graphql", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer pgh_pat_selector_secret")
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	require.Equal(t, http.StatusOK, res.Code, res.Body.String())
+}
+
+func TestBrokerSupportsPinnedGHReleaseListQuery(t *testing.T) {
+	handler := NewHandler(HandlerOptions{
+		Authority: testAuthority(t),
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"data":{"repository":{"releases":{"nodes":[]}}}}`)),
+			}, nil
+		}),
+	})
+	body := `{
+		"query":"query RepositoryReleaseList($owner: String!, $name: String!, $perPage: Int!, $endCursor: String, $direction: OrderDirection!) { repository(owner: $owner, name: $name) { releases(first: $perPage, orderBy: {field: CREATED_AT, direction: $direction}, after: $endCursor) { nodes { name tagName isDraft isLatest isPrerelease immutable createdAt publishedAt } pageInfo { hasNextPage endCursor } } } }",
+		"variables":{"owner":"outside","name":"private","perPage":5,"endCursor":null,"direction":"DESC"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/graphql", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer pgh_pat_selector_secret")
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	require.Equal(t, http.StatusOK, res.Code, res.Body.String())
+}
+
+func TestBrokerSupportsPinnedGHReleaseFeatureProbe(t *testing.T) {
+	handler := NewHandler(HandlerOptions{
+		Authority: testAuthority(t),
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"data":{"Release":{"fields":[{"name":"immutable"}]}}}`)),
+			}, nil
+		}),
+	})
+	body := `{"query":"query Release_fields { Release: __type(name: \"Release\") { fields { name } } }"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/graphql", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer pgh_pat_selector_secret")
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	require.Equal(t, http.StatusOK, res.Code, res.Body.String())
+}
+
 func TestBrokerRejectsUnscopedGraphQLRequests(t *testing.T) {
 	valid := `query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { name } }`
 	tests := []struct {
@@ -134,6 +203,27 @@ func TestBrokerRejectsUnscopedGraphQLRequests(t *testing.T) {
 			name:       "introspection",
 			method:     http.MethodPost,
 			body:       `{"query":"query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { __schema { types { name } } } }"}`,
+			wantStatus: http.StatusForbidden,
+			wantCode:   "PGH_POLICY_DENIED",
+		},
+		{
+			name:       "release feature probe with variables",
+			method:     http.MethodPost,
+			body:       `{"query":"query Release_fields { Release: __type(name: \"Release\") { fields { name } } }","variables":{"outside":"value"}}`,
+			wantStatus: http.StatusForbidden,
+			wantCode:   "PGH_POLICY_DENIED",
+		},
+		{
+			name:       "release feature probe with directive",
+			method:     http.MethodPost,
+			body:       `{"query":"query Release_fields { Release: __type(name: \"Release\") @include(if: true) { fields { name } } }"}`,
+			wantStatus: http.StatusForbidden,
+			wantCode:   "PGH_POLICY_DENIED",
+		},
+		{
+			name:       "release feature probe with nested alias",
+			method:     http.MethodPost,
+			body:       `{"query":"query Release_fields { Release: __type(name: \"Release\") { fields { fieldName: name } } }"}`,
 			wantStatus: http.StatusForbidden,
 			wantCode:   "PGH_POLICY_DENIED",
 		},

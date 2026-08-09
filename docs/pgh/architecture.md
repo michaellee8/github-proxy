@@ -38,7 +38,8 @@ directly to PostgreSQL. There is no administrative HTTP API.
   owner/name variables replace client values. Nested selections must also use a
   reviewed field allowlist. Author, owner, assignee, and review-request paths
   enter a restricted identity projection that blocks traversal back into the
-  wider GitHub graph.
+  wider GitHub graph. One exact, variable-free `Release_fields` schema probe is
+  allowed for pinned `gh` feature detection; all other introspection is denied.
 - Git smart HTTP is bound to the Target Repository. Push authorization parses
   receive-pack ref commands, rejects ref deletion, and applies branch and tag
   policy before streaming pack data.

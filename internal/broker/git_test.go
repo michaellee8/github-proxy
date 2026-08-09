@@ -91,6 +91,33 @@ func TestBrokerEnforcesReceivePackRefPolicy(t *testing.T) {
 	}
 }
 
+func TestBrokerAcceptsShallowReceivePackPreamble(t *testing.T) {
+	const oldOID = "1111111111111111111111111111111111111111"
+	const newOID = "2222222222222222222222222222222222222222"
+	command := oldOID + " " + newOID + " refs/tags/v1\x00report-status\n"
+	body := append(pktLine("shallow "+oldOID+"\n"), pktLine(command)...)
+	body = append(body, []byte("0000PACKpayload")...)
+	called := false
+	handler := NewHandler(HandlerOptions{
+		Authority: authorityWithPolicy(t, Policy{Name: "developer", Version: 1, Git: GitPolicy{Tags: true}}),
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			called = true
+			forwarded, err := io.ReadAll(req.Body)
+			require.NoError(t, err)
+			assert.Equal(t, body, forwarded)
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("0000"))}, nil
+		}),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/michaellee8/github-proxy.git/git-receive-pack", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer pgh_pat_selector_secret")
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	require.Equal(t, http.StatusOK, res.Code)
+	assert.True(t, called)
+}
+
 func TestBrokerScopesLFSBatchOperations(t *testing.T) {
 	for _, tt := range []struct {
 		operation  string

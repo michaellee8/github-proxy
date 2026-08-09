@@ -22,6 +22,7 @@ type graphQLOperationFamily struct {
 	operation     ast.Operation
 	ownerVariable string
 	nameVariable  string
+	schemaType    string
 }
 
 var graphQLOperationFamilies = map[string]graphQLOperationFamily{
@@ -39,10 +40,16 @@ var graphQLOperationFamilies = map[string]graphQLOperationFamily{
 	"RepositoryIssueTypes":    repositoryQueryFamily("name"),
 	"RepositoryLabelList":     repositoryQueryFamily("name"),
 	"RepositoryMilestoneList": repositoryQueryFamily("name"),
+	"RepositoryReleaseList":   repositoryQueryFamily("name"),
+	"Release_fields":          schemaQueryFamily("Release"),
 }
 
 func repositoryQueryFamily(nameVariable string) graphQLOperationFamily {
 	return graphQLOperationFamily{operation: ast.Query, ownerVariable: "owner", nameVariable: nameVariable}
+}
+
+func schemaQueryFamily(schemaType string) graphQLOperationFamily {
+	return graphQLOperationFamily{operation: ast.Query, schemaType: schemaType}
 }
 
 type graphQLRequest struct {
@@ -62,15 +69,15 @@ var graphQLRepositoryFields = map[string]bool{
 	"edges": true, "endCursor": true,
 	"fileCount": true, "filename": true, "files": true,
 	"hasDiscussionsEnabled": true, "hasIssuesEnabled": true, "hasNextPage": true, "hasPreviousPage": true, "hasProjectsEnabled": true, "hasWikiEnabled": true, "headRefName": true, "headRefOid": true, "homepageUrl": true,
-	"id": true, "isArchived": true, "isBot": true, "isDisabled": true, "isDraft": true, "isEmpty": true, "isFork": true, "isPrivate": true, "issue": true, "issueOrPullRequest": true, "issues": true, "issueTemplates": true,
+	"id": true, "immutable": true, "isArchived": true, "isBot": true, "isDisabled": true, "isDraft": true, "isEmpty": true, "isFork": true, "isLatest": true, "isPrerelease": true, "isPrivate": true, "issue": true, "issueOrPullRequest": true, "issues": true, "issueTemplates": true, "issueTypes": true,
 	"label": true, "labels": true, "language": true, "languages": true, "licenseInfo": true, "locked": true, "login": true,
 	"maintainerCanModify": true, "mergeable": true, "mergeCommit": true, "mergeCommitAllowed": true, "mergedAt": true, "mergeStateStatus": true, "message": true, "messageBody": true, "messageHeadline": true, "milestone": true, "milestones": true,
 	"name": true, "nameWithOwner": true, "nodes": true, "number": true,
 	"object": true, "oid": true, "owner": true,
-	"pageInfo": true, "potentialMergeCommit": true, "primaryLanguage": true, "progressPercentage": true, "pullRequest": true, "pullRequests": true, "pullRequestTemplates": true, "pushedAt": true,
+	"pageInfo": true, "potentialMergeCommit": true, "primaryLanguage": true, "progressPercentage": true, "publishedAt": true, "pullRequest": true, "pullRequests": true, "pullRequestTemplates": true, "pushedAt": true,
 	"rebaseMergeAllowed": true, "refs": true, "release": true, "releases": true, "requestedReviewer": true, "reviewDecision": true, "reviewRequests": true, "reviews": true,
 	"size": true, "squashMergeAllowed": true, "sshUrl": true, "startCursor": true, "startedAt": true, "state": true, "stateReason": true, "status": true, "statusCheckRollup": true,
-	"tag": true, "target": true, "text": true, "title": true, "totalCount": true,
+	"tag": true, "tagName": true, "target": true, "text": true, "title": true, "totalCount": true,
 	"updatedAt": true, "url": true,
 	"viewerCanAdminister": true, "viewerCanCreateProjects": true, "viewerCanSubscribe": true, "viewerPermission": true, "viewerSubscription": true, "visibility": true,
 	"workflowName": true,
@@ -163,8 +170,14 @@ func authorizeGraphQL(body io.Reader, session Session) (graphQLRequest, int, err
 	if !ok {
 		return payload, http.StatusForbidden, errorResponse{Message: "operation is not registered", Code: "PGH_OPERATION_UNKNOWN"}
 	}
+	if family.schemaType != "" && len(payload.Variables) != 0 {
+		return payload, http.StatusForbidden, errorResponse{Message: "operation is not allowed by this capability", Code: "PGH_POLICY_DENIED"}
+	}
 	if !validGraphQLOperation(document, operation, family) {
 		return payload, http.StatusForbidden, errorResponse{Message: "operation is not allowed by this capability", Code: "PGH_POLICY_DENIED"}
+	}
+	if family.schemaType != "" {
+		return payload, 0, errorResponse{}
 	}
 
 	variables := make(map[string]any, len(payload.Variables)+2)
@@ -180,6 +193,9 @@ func authorizeGraphQL(body io.Reader, session Session) (graphQLRequest, int, err
 func validGraphQLOperation(document *ast.QueryDocument, operation *ast.OperationDefinition, family graphQLOperationFamily) bool {
 	if operation.Operation != family.operation || family.operation != ast.Query {
 		return false
+	}
+	if family.schemaType != "" {
+		return validGraphQLSchemaProbe(operation, family.schemaType)
 	}
 	if operation.VariableDefinitions.ForName(family.ownerVariable) == nil || operation.VariableDefinitions.ForName(family.nameVariable) == nil {
 		return false
@@ -202,6 +218,29 @@ func validGraphQLOperation(document *ast.QueryDocument, operation *ast.Operation
 		}
 	}
 	return true
+}
+
+func validGraphQLSchemaProbe(operation *ast.OperationDefinition, schemaType string) bool {
+	if len(operation.VariableDefinitions) != 0 || len(operation.Directives) != 0 || len(operation.SelectionSet) != 1 {
+		return false
+	}
+	root, ok := operation.SelectionSet[0].(*ast.Field)
+	if !ok || root.Name != "__type" || root.Alias != schemaType || len(root.Arguments) != 1 ||
+		len(root.Directives) != 0 || len(root.SelectionSet) != 1 {
+		return false
+	}
+	typeName := root.Arguments.ForName("name")
+	if typeName == nil || typeName.Value == nil || typeName.Value.Kind != ast.StringValue || typeName.Value.Raw != schemaType {
+		return false
+	}
+	fields, ok := root.SelectionSet[0].(*ast.Field)
+	if !ok || fields.Name != "fields" || fields.Alias != fields.Name || len(fields.Arguments) != 0 ||
+		len(fields.Directives) != 0 || len(fields.SelectionSet) != 1 {
+		return false
+	}
+	name, ok := fields.SelectionSet[0].(*ast.Field)
+	return ok && name.Name == "name" && name.Alias == name.Name && len(name.Arguments) == 0 &&
+		len(name.Directives) == 0 && len(name.SelectionSet) == 0
 }
 
 func graphQLVariable(argument *ast.Argument, expected string) bool {

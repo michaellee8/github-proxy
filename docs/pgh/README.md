@@ -9,5 +9,6 @@ revocable Capability Tokens for one Target Repository and Policy Profile.
 - [Interactive Kubernetes deployment wizard](../../scripts/deploy-pgh-k8s-wizard.sh)
 - [Configuration and key rotation](configuration.md)
 - [Policy and compatibility matrix](compatibility.md)
+- [Live compatibility test runner](../../scripts/test-pgh-live.sh)
 - [Upgrading the upstream gh release](upgrading.md)
 - [Why this does not use Dependabot Proxy](dependabot-proxy.md)

@@ -29,6 +29,7 @@ type restRoute struct {
 // their repository scope and identifier provenance have been reviewed.
 var restRoutes = []restRoute{
 	{http.MethodGet, "", ""},
+	{http.MethodGet, "readme", ""},
 	{http.MethodGet, "actions/workflows", ""}, {http.MethodGet, "actions/workflows/:", ""}, {http.MethodGet, "actions/workflows/:/runs", ""},
 	{http.MethodGet, "actions/runs", ""}, {http.MethodGet, "actions/runs/:", ""}, {http.MethodGet, "actions/runs/:/jobs", ""}, {http.MethodGet, "actions/runs/:/logs", ""},
 	{http.MethodGet, "actions/runs/:/attempts/:", ""}, {http.MethodGet, "actions/runs/:/attempts/:/jobs", ""}, {http.MethodGet, "actions/runs/:/attempts/:/logs", ""},
