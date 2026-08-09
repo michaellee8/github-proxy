@@ -125,8 +125,10 @@ selectively:
   and related tests.
 - Airlock's request normalization, deny rules, rate limiting, and telemetry
   patterns.
-- A pinned upstream `gh` fork for `pgh`, preserving CLI compatibility while
-  forcing all destinations through the broker.
+- A pinned upstream `gh` fork for `pgh`, preserving the command and help surface
+  while forcing all destinations through the broker. Broker compatibility is
+  registered and live-tested operation-by-operation rather than implied by a
+  command appearing in help.
 
 Fork Agent Vault instead only if supporting credentials beyond GitHub is a near-
 term product requirement. Either route still requires a purpose-built GitHub
