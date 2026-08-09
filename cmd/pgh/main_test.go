@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,8 +10,84 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cli/cli/v2/internal/browser"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/telemetry"
+	rootCmd "github.com/cli/cli/v2/pkg/cmd/root"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/extensions"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPGHCommandSurfaceIsDiscoverable(t *testing.T) {
+	root := newPGHRoot(t)
+	var paths []string
+	var runnablePaths []string
+	walkCommands(root, func(command *cobra.Command) {
+		if command == root {
+			return
+		}
+		paths = append(paths, fmt.Sprintf(
+			"%s\trunnable=%t\thidden=%t\thelp-topic=%t\tchildren=%d",
+			command.CommandPath(),
+			command.Runnable(),
+			command.Hidden,
+			command.IsAdditionalHelpTopicCommand(),
+			len(command.Commands()),
+		))
+		if command.Runnable() {
+			runnablePaths = append(runnablePaths, strings.TrimPrefix(command.CommandPath(), "pgh "))
+		}
+		t.Run(strings.TrimPrefix(command.CommandPath(), "pgh "), func(t *testing.T) {
+			require.NotEmpty(t, command.UseLine())
+		})
+	})
+	sort.Strings(paths)
+	sort.Strings(runnablePaths)
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "internal", "pghcmd", "testdata", "runnable-command-audit.txt"))
+	require.NoError(t, err)
+	var auditedPaths []string
+	for _, line := range strings.Split(string(manifest), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			auditedPaths = append(auditedPaths, line)
+		}
+	}
+	require.Equal(t, auditedPaths, runnablePaths, "every runnable upstream command needs exactly one live audit case")
+	t.Logf("pinned pgh command paths (%d):\n%s", len(paths), strings.Join(paths, "\n"))
+}
+
+func newPGHRoot(t *testing.T) *cobra.Command {
+	t.Helper()
+	ios, _, _, _ := iostreams.Test()
+	factory := &cmdutil.Factory{
+		IOStreams: ios,
+		Config:    func() (gh.Config, error) { return config.NewBlankConfig(), nil },
+		Browser:   &browser.Stub{},
+		ExtensionManager: &extensions.ExtensionManagerMock{
+			ListFunc: func() []extensions.Extension { return nil },
+		},
+	}
+	root, err := rootCmd.NewCmdRootWithOptions(
+		factory,
+		&telemetry.NoOpService{},
+		"v2.97.0",
+		"",
+		rootCmd.Options{CommandName: "pgh"},
+	)
+	require.NoError(t, err)
+	return root
+}
+
+func walkCommands(command *cobra.Command, visit func(*cobra.Command)) {
+	visit(command)
+	for _, child := range command.Commands() {
+		walkCommands(child, visit)
+	}
+}
 
 func TestPGHHelpUsesPGHIdentityAndPreservesUpstreamCommands(t *testing.T) {
 	result := runPGH(t, "--help")
@@ -65,6 +142,36 @@ func TestPGHUsesAnIsolatedConfigDirectory(t *testing.T) {
 	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(ghConfigDir, "config.yml"))
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestPGHUsesAnIsolatedExtensionDataDirectory(t *testing.T) {
+	userDataDir := t.TempDir()
+	originalExtension := filepath.Join(userDataDir, "gh", "extensions", "gh-original", "gh-original")
+	require.NoError(t, os.MkdirAll(filepath.Dir(originalExtension), 0o700))
+	require.NoError(t, os.WriteFile(originalExtension, []byte("#!/bin/sh\nexit 0\n"), 0o700))
+	pghConfigDir := t.TempDir()
+
+	result := runPGHWithEnv(t, map[string]string{
+		"PGH_CONFIG_DIR": pghConfigDir,
+		"PGH_HOST":       "broker.example.com",
+		"PGH_TOKEN":      "pgh-capability",
+		"XDG_DATA_HOME":  userDataDir,
+	}, "extension", "remove", "original")
+
+	require.Equal(t, 1, result.exitCode)
+	require.Contains(t, result.stderr, filepath.Join(pghConfigDir, "data", "gh", "extensions"))
+	_, err := os.Stat(originalExtension)
+	require.NoError(t, err)
+}
+
+func TestPGHRejectsTelemetryTransportBypass(t *testing.T) {
+	result := runPGHWithEnv(t, map[string]string{
+		"PGH_HOST":  "broker.example.com",
+		"PGH_TOKEN": "pgh-capability",
+	}, "send-telemetry")
+
+	require.Equal(t, 1, result.exitCode)
+	require.Contains(t, result.stderr, "pgh refuses send-telemetry because it does not use the Broker transport")
 }
 
 func TestPGHEnvironmentPolicy(t *testing.T) {

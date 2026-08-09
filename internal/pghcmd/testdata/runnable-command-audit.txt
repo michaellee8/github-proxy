@@ -1,0 +1,212 @@
+# Pinned gh v2.97.0 runnable command paths. Every line must have exactly one
+# operational case across the live pgh command audits.
+accessibility
+agent-task
+agent-task create
+agent-task list
+agent-task view
+alias delete
+alias import
+alias list
+alias set
+api
+attestation download
+attestation inspect
+attestation trusted-root
+attestation verify
+auth git-credential
+auth login
+auth logout
+auth refresh
+auth setup-git
+auth status
+auth switch
+auth token
+aw
+browse
+cache delete
+cache list
+co
+codespace code
+codespace cp
+codespace create
+codespace delete
+codespace edit
+codespace jupyter
+codespace list
+codespace logs
+codespace ports
+codespace ports forward
+codespace ports visibility
+codespace rebuild
+codespace select
+codespace ssh
+codespace stop
+codespace view
+completion
+config clear-cache
+config get
+config list
+config set
+copilot
+credits
+discussion comment
+discussion create
+discussion edit
+discussion list
+discussion view
+extension browse
+extension create
+extension exec
+extension install
+extension list
+extension remove
+extension search
+extension upgrade
+gist clone
+gist create
+gist delete
+gist edit
+gist list
+gist rename
+gist view
+gpg-key add
+gpg-key delete
+gpg-key list
+issue close
+issue comment
+issue create
+issue delete
+issue develop
+issue edit
+issue list
+issue lock
+issue pin
+issue reopen
+issue status
+issue transfer
+issue unlock
+issue unpin
+issue view
+label clone
+label create
+label delete
+label edit
+label list
+licenses
+org list
+pr checkout
+pr checks
+pr close
+pr comment
+pr create
+pr diff
+pr edit
+pr list
+pr lock
+pr merge
+pr ready
+pr reopen
+pr revert
+pr review
+pr status
+pr unlock
+pr update-branch
+pr view
+preview prompter
+project close
+project copy
+project create
+project delete
+project edit
+project field-create
+project field-delete
+project field-list
+project item-add
+project item-archive
+project item-create
+project item-delete
+project item-edit
+project item-list
+project link
+project list
+project mark-template
+project unlink
+project view
+release create
+release delete
+release delete-asset
+release download
+release edit
+release list
+release upload
+release verify
+release verify-asset
+release view
+repo archive
+repo autolink create
+repo autolink delete
+repo autolink list
+repo autolink view
+repo clone
+repo create
+repo credits
+repo delete
+repo deploy-key add
+repo deploy-key delete
+repo deploy-key list
+repo edit
+repo fork
+repo garden
+repo gitignore list
+repo gitignore view
+repo license list
+repo license view
+repo list
+repo read-dir
+repo read-file
+repo rename
+repo set-default
+repo sync
+repo unarchive
+repo view
+ruleset check
+ruleset list
+ruleset view
+run cancel
+run delete
+run download
+run list
+run rerun
+run view
+run watch
+search code
+search commits
+search issues
+search prs
+search repos
+secret delete
+secret list
+secret set
+send-telemetry
+skill install
+skill list
+skill preview
+skill publish
+skill search
+skill update
+ssh-key add
+ssh-key delete
+ssh-key list
+stack
+status
+variable delete
+variable get
+variable list
+variable set
+version
+workflow disable
+workflow enable
+workflow list
+workflow run
+workflow view

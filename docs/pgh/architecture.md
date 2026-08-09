@@ -47,6 +47,10 @@ directly to PostgreSQL. There is no administrative HTTP API.
 - `pgh` sends capability-bearing HTTP only over HTTPS to the exact configured
   broker authority. Alternate ports, redirects to another authority, and direct
   GitHub destinations fail closed.
+- `pgh` disables upstream telemetry, rejects the hidden `send-telemetry`
+  command, and places extension data and state beneath `PGH_CONFIG_DIR`. This
+  prevents direct telemetry egress and prevents `pgh extension` commands from
+  reading or modifying the user's original `gh` extensions.
 
 ## Deliberate limits
 

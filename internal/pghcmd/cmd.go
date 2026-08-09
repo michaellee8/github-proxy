@@ -58,17 +58,22 @@ func prepareEnvironment() (string, error) {
 		}
 		configDir = filepath.Join(userConfigDir, "pgh")
 	}
+	dataDir := filepath.Join(configDir, "data")
+	stateDir := filepath.Join(configDir, "state")
 
 	if err := os.Setenv("GH_CONFIG_DIR", configDir); err != nil {
 		return "", fmt.Errorf("configure pgh environment variable GH_CONFIG_DIR: %w", err)
 	}
 	for name, value := range map[string]string{
 		"GH_HOST":                 host,
+		"GH_TELEMETRY":            "disabled",
 		keyring.NamespaceEnv:      "pgh",
 		"GH_TOKEN":                "",
 		"GH_ENTERPRISE_TOKEN":     token,
 		"GITHUB_TOKEN":            "",
 		"GITHUB_ENTERPRISE_TOKEN": "",
+		"XDG_DATA_HOME":           dataDir,
+		"XDG_STATE_HOME":          stateDir,
 	} {
 		if err := setOrUnsetenv(name, value); err != nil {
 			return "", fmt.Errorf("configure pgh environment variable %s: %w", name, err)
@@ -133,6 +138,9 @@ func (t *brokerOnlyTransport) RoundTrip(request *http.Request) (*http.Response, 
 
 func brokerOnlyCommandValidator(brokerHost string) func(*cobra.Command) error {
 	return func(command *cobra.Command) error {
+		if command.Name() == "send-telemetry" {
+			return fmt.Errorf("pgh refuses send-telemetry because it does not use the Broker transport")
+		}
 		for _, flagName := range []string{"hostname", "host"} {
 			flag := command.Flags().Lookup(flagName)
 			if flag == nil || !flag.Changed {

@@ -34,6 +34,9 @@ fi
 
 cd "${repo_root}"
 
+go test ./cmd/pgh ./internal/pghcmd \
+  -run '^(TestPGHCommandSurfaceIsDiscoverable|TestRunnableCommandAuditManifestMatchesLiveCases)$' \
+  -count=1
 go test ./internal/pghcmd -run '^TestLivePGH' -count=1 -v
 go test ./internal/broker \
   -run '^TestLive(GitHubReadCompatibility|GitSmartHTTPReadCompatibility)$' \

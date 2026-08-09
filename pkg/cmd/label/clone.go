@@ -143,6 +143,7 @@ func cloneLabels(client *http.Client, destination ghrepo.Interface, opts *cloneO
 		})
 	}
 
+scheduleLabels:
 	for _, label := range labels {
 		createOpts := createOptions{
 			Name:        label.Name,
@@ -150,7 +151,11 @@ func cloneLabels(client *http.Client, destination ghrepo.Interface, opts *cloneO
 			Color:       label.Color,
 			Force:       opts.Force,
 		}
-		toCreate <- createOpts
+		select {
+		case toCreate <- createOpts:
+		case <-ctx.Done():
+			break scheduleLabels
+		}
 	}
 
 	close(toCreate)

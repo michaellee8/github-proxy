@@ -78,7 +78,30 @@ creation, even when `--git-push=none`.
 ## pgh command status
 
 The REST and GraphQL tables above describe authorization policy, not blanket CLI
-compatibility. Only the following pinned `gh` v2.97.0 command shapes are declared
+compatibility.
+
+The pinned `gh` v2.97.0 tree contains 247 registered command paths: 210 are
+runnable and 37 are structural groups or help topics. Every runnable path has
+exactly one case in the live command audit. The source-derived manifest in
+`internal/pghcmd/testdata/runnable-command-audit.txt` is checked against both the
+Cobra tree and the audit tables, so adding or removing an upstream command fails
+CI until its outcome is reviewed.
+
+Audit outcomes distinguish:
+
+- successful repository reads forwarded to real `api.github.com`;
+- expected Broker policy or operation-registration denials;
+- commands that reject the Broker host because upstream supports GitHub.com only;
+- local configuration, filesystem, external-process, and noninteractive outcomes.
+
+The command audit is deliberately read-only at the GitHub boundary. Its Broker
+uses the configured `GH_TOKEN` for real `GET`, `HEAD`, and registered GraphQL
+queries, but a final transport rejects REST mutations before they reach GitHub.
+Thus all mutation commands have tested CLI and Broker outcomes without implying
+live mutation compatibility or changing repository state. `pgh send-telemetry`
+is rejected because upstream creates an HTTP client outside the Broker transport.
+
+Only the following command shapes are currently declared live-endpoint
 compatible. Each row runs through the real `pgh` command tree and Broker against
 `api.github.com` in `internal/pghcmd/live_integration_test.go`.
 

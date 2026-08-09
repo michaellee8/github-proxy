@@ -2,7 +2,11 @@ package label
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cli/cli/v2/internal/ghrepo"
@@ -11,7 +15,14 @@ import (
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type cloneRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f cloneRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func TestNewCmdClone(t *testing.T) {
 	tests := []struct {
@@ -582,4 +593,58 @@ func TestCloneRun(t *testing.T) {
 			assert.Equal(t, tt.wantStdout, stdout.String())
 		})
 	}
+}
+
+func TestCloneRunStopsSchedulingLabelsAfterCreateFailure(t *testing.T) {
+	labels := make([]map[string]string, 25)
+	for index := range labels {
+		labels[index] = map[string]string{
+			"name":  "label-" + strconv.Itoa(index),
+			"color": "ffffff",
+		}
+	}
+	payload, err := json.Marshal(map[string]any{
+		"data": map[string]any{
+			"repository": map[string]any{
+				"labels": map[string]any{
+					"totalCount": len(labels),
+					"nodes":      labels,
+					"pageInfo": map[string]any{
+						"hasNextPage": false,
+						"endCursor":   nil,
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	transport := cloneRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		status := http.StatusOK
+		body := string(payload)
+		if request.URL.Path != "/graphql" {
+			status = http.StatusUnprocessableEntity
+			body = `{"message":"Validation Failed","errors":[{"resource":"Label","code":"invalid","field":"color"}]}`
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+	ioStreams, _, _, _ := iostreams.Test()
+	opts := &cloneOptions{
+		SourceRepo: ghrepo.New("cli", "cli"),
+		HttpClient: func() (*http.Client, error) {
+			return &http.Client{Transport: transport}, nil
+		},
+		IO: ioStreams,
+		BaseRepo: func() (ghrepo.Interface, error) {
+			return ghrepo.New("OWNER", "REPO"), nil
+		},
+	}
+
+	err = cloneRun(opts)
+	require.ErrorContains(t, err, "Label.color is invalid")
 }
