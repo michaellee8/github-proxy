@@ -1,4 +1,5 @@
 .env
+.env.pgh-deploy
 ignored-files/
 gh-cli-source/
 /bin
