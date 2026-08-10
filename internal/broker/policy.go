@@ -3,6 +3,8 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -11,12 +13,14 @@ import (
 const maxRESTSemanticBodyBytes = 1 << 20
 
 const (
-	grantActionsWrite     = "actions.write"
-	grantChecksWrite      = "checks.write"
-	grantContentsWrite    = "contents.write"
-	grantDeploymentsWrite = "deployments.write"
-	grantObjectsDelete    = "objects.delete"
-	grantReleasesWrite    = "releases.write"
+	grantActionsWrite       = "actions.write"
+	grantChecksWrite        = "checks.write"
+	grantContentsWrite      = "contents.write"
+	grantDeploymentsWrite   = "deployments.write"
+	grantObjectsDelete      = "objects.delete"
+	grantPullsMerge         = "pulls.merge"
+	grantPullsReviewDismiss = "pulls.review.dismiss"
+	grantReleasesWrite      = "releases.write"
 )
 
 type restRoute struct {
@@ -60,9 +64,9 @@ var restRoutes = []restRoute{
 	{http.MethodPost, "issues/:/reactions", ""}, {http.MethodDelete, "issues/:/reactions/:", ""}, {http.MethodPost, "issues/comments/:/reactions", ""}, {http.MethodDelete, "issues/comments/:/reactions/:", ""},
 	{http.MethodPost, "labels", ""}, {http.MethodPatch, "labels/:", ""}, {http.MethodDelete, "labels/:", ""},
 	{http.MethodPost, "milestones", ""}, {http.MethodPatch, "milestones/:", ""}, {http.MethodDelete, "milestones/:", ""},
-	{http.MethodPost, "pulls", ""}, {http.MethodPatch, "pulls/:", ""}, {http.MethodPut, "pulls/:/merge", ""},
+	{http.MethodPost, "pulls", ""}, {http.MethodPatch, "pulls/:", ""}, {http.MethodPut, "pulls/:/merge", grantPullsMerge},
 	{http.MethodPost, "pulls/:/comments", ""}, {http.MethodPost, "pulls/:/comments/:/replies", ""}, {http.MethodPatch, "pulls/comments/:", ""}, {http.MethodDelete, "pulls/comments/:", ""},
-	{http.MethodPost, "pulls/:/reviews", ""}, {http.MethodDelete, "pulls/:/reviews/:", ""}, {http.MethodPost, "pulls/:/reviews/:/events", ""}, {http.MethodPut, "pulls/:/reviews/:/dismissals", ""},
+	{http.MethodPost, "pulls/:/reviews", ""}, {http.MethodDelete, "pulls/:/reviews/:", ""}, {http.MethodPost, "pulls/:/reviews/:/events", ""}, {http.MethodPut, "pulls/:/reviews/:/dismissals", grantPullsReviewDismiss},
 	{http.MethodPost, "pulls/:/requested_reviewers", ""}, {http.MethodDelete, "pulls/:/requested_reviewers", ""},
 	{http.MethodPost, "pulls/comments/:/reactions", ""}, {http.MethodDelete, "pulls/comments/:/reactions/:", ""},
 
@@ -83,11 +87,29 @@ var restRoutes = []restRoute{
 // IsKnownGrant rejects misspelled or unsupported authority at issue time.
 func IsKnownGrant(grant string) bool {
 	switch grant {
-	case grantActionsWrite, grantChecksWrite, grantContentsWrite, grantDeploymentsWrite, grantObjectsDelete, grantReleasesWrite:
+	case grantActionsWrite, grantChecksWrite, grantContentsWrite, grantDeploymentsWrite, grantObjectsDelete, grantPullsMerge, grantPullsReviewDismiss, grantReleasesWrite:
 		return true
 	default:
 		return false
 	}
+}
+
+// ValidatePolicy rejects unsupported or malformed Policy Profiles.
+func ValidatePolicy(policy Policy) error {
+	if policy.Name != "developer" || policy.Version != 1 {
+		return errors.New("policy profile must be developer version 1")
+	}
+	switch policy.Git.Push {
+	case GitPushNone, GitPushNonDefault, GitPushAll:
+	default:
+		return errors.New("Git push policy must be none, non-default, or all")
+	}
+	for grant, enabled := range policy.Grants {
+		if !enabled || !IsKnownGrant(grant) {
+			return fmt.Errorf("unsupported policy grant %q", grant)
+		}
+	}
+	return nil
 }
 
 func (p Policy) allows(grant string) bool {
@@ -254,6 +276,11 @@ func authorizeRESTBody(req *http.Request, path []string, repository Repository, 
 	}
 	if requireTag && !policy.Git.Tags {
 		return http.StatusForbidden, errorResponse{Message: "tag creation is not allowed", Code: "PGH_REF_DENIED"}
+	}
+	if requireBoundBranch {
+		if _, supplied := fields["head_repo"]; supplied {
+			return http.StatusForbidden, errorResponse{Message: "request head repository is not allowed", Code: "PGH_REF_DENIED"}
+		}
 	}
 	ref := repository.DefaultBranch
 	if raw, ok := fields[refField]; ok {

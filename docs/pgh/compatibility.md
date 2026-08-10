@@ -12,7 +12,7 @@ not grant every current or future endpoint beneath a resource prefix.
 | Resource under `/repos/OWNER/REPO` | Read | Default mutation | Additional grant | Notes |
 | --- | --- | --- | --- | --- |
 | repository metadata | yes | no | none | Repository root accepts `GET` and `HEAD` only. |
-| issues, pulls, labels, milestones | yes | registered create/update routes | `objects.delete` for registered `DELETE` routes | Includes pull request merge routes. Issue transfer, sub-issue/dependency relationships, pull update-branch, and unregistered routes are denied. Pull request heads must belong to the Target Repository. |
+| issues, pulls, labels, milestones | yes | registered create/update routes | `pulls.merge` for merge, `pulls.review.dismiss` for review dismissal, and `objects.delete` for registered `DELETE` routes | Issue transfer, sub-issue/dependency relationships, pull update-branch, and unregistered routes are denied. Pull request heads must belong to the Target Repository. |
 | Actions | yes | no | `actions.write` | Secrets and variables remain hard denied. |
 | check runs, check suites, statuses | yes | no | `checks.write` | |
 | commits, contents, Git data | yes | no | `contents.write` | Content branch fields and REST Git-ref writes are checked against Git push policy. Only branch and tag refs are accepted, and REST ref deletion is always denied. |
@@ -23,7 +23,8 @@ not grant every current or future endpoint beneath a resource prefix.
 | account, organization, search, and other global routes | no | no | none | Requests must be rooted at the Target Repository. |
 
 Known grant names are `actions.write`, `checks.write`, `contents.write`,
-`deployments.write`, `objects.delete`, and `releases.write`.
+`deployments.write`, `objects.delete`, `pulls.merge`,
+`pulls.review.dismiss`, and `releases.write`.
 Every `DELETE` request also requires `objects.delete`, even when its resource
 has a separate write grant. This grant never enables an unregistered route or
 Git-ref deletion.
@@ -124,10 +125,12 @@ compatible. Each row runs through the real `pgh` command tree and Broker against
 Git HTTPS live checks run real `git ls-remote`, shallow clone, and fetch through
 the Broker. Explicitly enabled write checks create and remove a non-default
 branch and a tag through GitHub's receive-pack endpoint, then verify that deletion
-through the Broker is denied. LFS policy has unit coverage but is not yet declared
-live-endpoint compatible.
+through the Broker is denied. The write opt-in also exercises reversible REST
+lifecycles for labels, milestones, issues, comments, reactions, branches, pull
+requests, and draft releases. LFS policy has unit coverage but is not yet
+declared live-endpoint compatible.
 
-Run the read-only matrix with `scripts/test-pgh-live.sh`. Temporary-ref tests
+Run the read-only matrix with `script/test-pgh-live.sh`. Temporary-ref tests
 require both `PGH_LIVE_ALLOW_WRITES=1` and `PGH_LIVE_DEFAULT_BRANCH`, and first
 verify that the configured default branch ref exists. Keep these tests tied to
 the pinned `gh` release: a new upstream release can change an internal command

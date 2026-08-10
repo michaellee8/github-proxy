@@ -3,6 +3,7 @@ package broker_test
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +26,20 @@ type liveAuthority struct {
 	session broker.Session
 }
 
-func (a liveAuthority) Resolve(_ context.Context, token string) (broker.Session, error) {
+type liveAuditStore struct{}
+
+func (liveAuditStore) RecordAuditEvent(context.Context, broker.AuditEvent) error { return nil }
+
+func newLiveBrokerHandler(t *testing.T, options broker.HandlerOptions) http.Handler {
+	t.Helper()
+	limiter, err := broker.NewLocalRequestLimiter(broker.LocalLimitOptions{ReadsPerMinute: 10_000, MutationsPerMinute: 10_000, Concurrent: 100})
+	require.NoError(t, err)
+	options.Auditor = broker.NewRequestAuditor(liveAuditStore{}, broker.NewJSONAuditEmitter(io.Discard))
+	options.Limiter = limiter
+	return broker.NewHandler(options)
+}
+
+func (a liveAuthority) Resolve(_ context.Context, token string, _ broker.RepositoryFreshness) (broker.Session, error) {
 	if token != "live-capability" {
 		return broker.Session{}, errors.New("unexpected capability token")
 	}
@@ -41,13 +56,11 @@ func TestLiveGitHubReadCompatibility(t *testing.T) {
 	require.True(t, ok, "PGH_LIVE_REPO must be OWNER/NAME")
 	session := broker.Session{
 		CapabilityID: "live-read-test",
-		Repository: broker.Repository{
-			Owner: owner, Name: name, UpstreamHost: "github.com", APIBaseURL: "https://api.github.com",
-			APIVersion: "2022-11-28", UpstreamToken: token,
-		},
-		Policy: broker.Policy{Name: "developer", Version: 1},
+		Repository:   broker.Repository{Owner: owner, Name: name},
+		Upstream:     broker.UpstreamAccess{Host: "github.com", APIBaseURL: "https://api.github.com", APIVersion: "2022-11-28", Token: token},
+		Policy:       broker.Policy{Name: "developer", Version: 1},
 	}
-	handler := broker.NewHandler(broker.HandlerOptions{Authority: liveAuthority{session: session}})
+	handler := newLiveBrokerHandler(t, broker.HandlerOptions{Authority: liveAuthority{session: session}})
 
 	t.Run("REST repository metadata", func(t *testing.T) {
 		res := brokerRequest(t, handler, http.MethodGet, "/api/v3/repos/"+owner+"/"+name, "")
@@ -76,9 +89,10 @@ func TestLiveGitSmartHTTPReadCompatibility(t *testing.T) {
 	}
 	owner, name, ok := strings.Cut(repositoryName, "/")
 	require.True(t, ok, "PGH_LIVE_REPO must be OWNER/NAME")
-	handler := broker.NewHandler(broker.HandlerOptions{Authority: liveAuthority{session: broker.Session{
+	handler := newLiveBrokerHandler(t, broker.HandlerOptions{Authority: liveAuthority{session: broker.Session{
 		CapabilityID: "live-git-test",
-		Repository:   broker.Repository{Owner: owner, Name: name, UpstreamHost: "github.com", UpstreamToken: token},
+		Repository:   broker.Repository{Owner: owner, Name: name},
+		Upstream:     broker.UpstreamAccess{Host: "github.com", Token: token},
 		Policy:       broker.Policy{Name: "developer", Version: 1},
 	}}})
 	server := httptest.NewTLSServer(handler)
@@ -129,12 +143,11 @@ func TestLiveGitSmartHTTPNonDefaultPushCompatibility(t *testing.T) {
 	owner, name, ok := strings.Cut(repositoryName, "/")
 	require.True(t, ok, "PGH_LIVE_REPO must be OWNER/NAME")
 	requireLiveGitHubRef(t, token, repositoryName, "heads/"+defaultBranch)
-	handler := broker.NewHandler(broker.HandlerOptions{Authority: liveAuthority{session: broker.Session{
+	handler := newLiveBrokerHandler(t, broker.HandlerOptions{Authority: liveAuthority{session: broker.Session{
 		CapabilityID: "live-git-push-test",
-		Repository: broker.Repository{
-			Owner: owner, Name: name, DefaultBranch: defaultBranch, UpstreamHost: "github.com", UpstreamToken: token,
-		},
-		Policy: broker.Policy{Name: "developer", Version: 1, Git: broker.GitPolicy{Push: broker.GitPushNonDefault}},
+		Repository:   broker.Repository{Owner: owner, Name: name, DefaultBranch: defaultBranch},
+		Upstream:     broker.UpstreamAccess{Host: "github.com", Token: token},
+		Policy:       broker.Policy{Name: "developer", Version: 1, Git: broker.GitPolicy{Push: broker.GitPushNonDefault}},
 	}}})
 	server := httptest.NewTLSServer(handler)
 	t.Cleanup(server.Close)
@@ -202,12 +215,11 @@ func TestLiveGitSmartHTTPTagPushCompatibility(t *testing.T) {
 	owner, name, ok := strings.Cut(repositoryName, "/")
 	require.True(t, ok, "PGH_LIVE_REPO must be OWNER/NAME")
 	requireLiveGitHubRef(t, token, repositoryName, "heads/"+defaultBranch)
-	handler := broker.NewHandler(broker.HandlerOptions{Authority: liveAuthority{session: broker.Session{
+	handler := newLiveBrokerHandler(t, broker.HandlerOptions{Authority: liveAuthority{session: broker.Session{
 		CapabilityID: "live-git-tag-test",
-		Repository: broker.Repository{
-			Owner: owner, Name: name, DefaultBranch: defaultBranch, UpstreamHost: "github.com", UpstreamToken: token,
-		},
-		Policy: broker.Policy{Name: "developer", Version: 1, Git: broker.GitPolicy{Push: broker.GitPushNone, Tags: true}},
+		Repository:   broker.Repository{Owner: owner, Name: name, DefaultBranch: defaultBranch},
+		Upstream:     broker.UpstreamAccess{Host: "github.com", Token: token},
+		Policy:       broker.Policy{Name: "developer", Version: 1, Git: broker.GitPolicy{Push: broker.GitPushNone, Tags: true}},
 	}}})
 	server := httptest.NewTLSServer(handler)
 	t.Cleanup(server.Close)
@@ -258,6 +270,174 @@ func TestLiveGitSmartHTTPTagPushCompatibility(t *testing.T) {
 	deleteThroughBroker.Env = gitEnvironment
 	output, err = deleteThroughBroker.CombinedOutput()
 	require.Error(t, err, string(output))
+}
+
+func TestLiveRESTMutationCompatibility(t *testing.T) {
+	requireLiveWriteOptIn(t)
+	token := os.Getenv("PGH_LIVE_TOKEN")
+	repositoryName := os.Getenv("PGH_LIVE_REPO")
+	if token == "" || repositoryName == "" {
+		t.Skip("PGH_LIVE_TOKEN and PGH_LIVE_REPO are not set")
+	}
+	owner, name, ok := strings.Cut(repositoryName, "/")
+	require.True(t, ok, "PGH_LIVE_REPO must be OWNER/NAME")
+	metadata := liveGitHubJSON(t, token, http.MethodGet, "repos/"+repositoryName, "", http.StatusOK)
+	repositoryID, ok := metadata["id"].(float64)
+	require.True(t, ok)
+	defaultBranch, ok := metadata["default_branch"].(string)
+	require.True(t, ok)
+
+	policy := broker.Policy{
+		Name: "developer", Version: 1,
+		Grants: map[string]bool{
+			"contents.write": true, "objects.delete": true, "releases.write": true,
+		},
+		Git: broker.GitPolicy{Push: broker.GitPushAll, Tags: true},
+	}
+	handler := newLiveBrokerHandler(t, broker.HandlerOptions{Authority: liveAuthority{session: broker.Session{
+		CapabilityID: "live-rest-mutation-test",
+		Repository: broker.Repository{
+			ID: int64(repositoryID), Owner: owner, Name: name, DefaultBranch: defaultBranch,
+		},
+		Upstream: broker.UpstreamAccess{Host: "github.com", APIBaseURL: "https://api.github.com", APIVersion: "2022-11-28", Token: token},
+		Policy:   policy,
+	}}})
+	prefix := fmt.Sprintf("pgh-live-%d", time.Now().UnixNano())
+	labelName := prefix + "-label"
+
+	liveBrokerJSON(t, handler, http.MethodPost, "/api/v3/repos/"+repositoryName+"/labels", `{"name":"`+labelName+`","color":"1d76db"}`, http.StatusCreated)
+	defer deleteLiveGitHubResource(t, token, "repos/"+repositoryName+"/labels/"+labelName)
+
+	milestone := liveBrokerJSON(t, handler, http.MethodPost, "/api/v3/repos/"+repositoryName+"/milestones", `{"title":"`+prefix+`"}`, http.StatusCreated)
+	milestoneNumber := jsonNumber(t, milestone, "number")
+	defer deleteLiveGitHubResource(t, token, fmt.Sprintf("repos/%s/milestones/%d", repositoryName, milestoneNumber))
+
+	issue := liveBrokerJSON(t, handler, http.MethodPost, "/api/v3/repos/"+repositoryName+"/issues", fmt.Sprintf(`{"title":"%s issue","body":"temporary Broker mutation test","labels":["%s"],"milestone":%d}`, prefix, labelName, milestoneNumber), http.StatusCreated)
+	issueNumber := jsonNumber(t, issue, "number")
+	defer closeLiveGitHubIssue(t, token, repositoryName, issueNumber)
+
+	comment := liveBrokerJSON(t, handler, http.MethodPost, fmt.Sprintf("/api/v3/repos/%s/issues/%d/comments", repositoryName, issueNumber), `{"body":"temporary Broker comment"}`, http.StatusCreated)
+	commentID := jsonNumber(t, comment, "id")
+	liveBrokerJSON(t, handler, http.MethodPatch, fmt.Sprintf("/api/v3/repos/%s/issues/comments/%d", repositoryName, commentID), `{"body":"updated temporary Broker comment"}`, http.StatusOK)
+
+	reaction := liveBrokerJSON(t, handler, http.MethodPost, fmt.Sprintf("/api/v3/repos/%s/issues/%d/reactions", repositoryName, issueNumber), `{"content":"+1"}`, http.StatusCreated)
+	reactionID := jsonNumber(t, reaction, "id")
+	liveBrokerJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/v3/repos/%s/issues/%d/reactions/%d", repositoryName, issueNumber, reactionID), "", http.StatusNoContent)
+	liveBrokerJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/v3/repos/%s/issues/comments/%d", repositoryName, commentID), "", http.StatusNoContent)
+	liveBrokerJSON(t, handler, http.MethodPatch, fmt.Sprintf("/api/v3/repos/%s/issues/%d", repositoryName, issueNumber), `{"state":"closed"}`, http.StatusOK)
+
+	defaultRef := ensureLiveDefaultBranch(t, handler, token, repositoryName, defaultBranch)
+	object, ok := defaultRef["object"].(map[string]any)
+	require.True(t, ok)
+	sha, ok := object["sha"].(string)
+	require.True(t, ok)
+	branch := prefix + "-branch"
+	liveBrokerJSON(t, handler, http.MethodPost, "/api/v3/repos/"+repositoryName+"/git/refs", fmt.Sprintf(`{"ref":"refs/heads/%s","sha":"%s"}`, branch, sha), http.StatusCreated)
+	defer deleteLiveGitHubRef(t, token, repositoryName, "heads/"+branch)
+	branchContent := base64.StdEncoding.EncodeToString([]byte("temporary Broker mutation test\n"))
+	liveBrokerJSON(t, handler, http.MethodPut, "/api/v3/repos/"+repositoryName+"/contents/"+prefix+".txt", fmt.Sprintf(`{"message":"Add temporary Broker test content","content":"%s","branch":"%s"}`, branchContent, branch), http.StatusCreated)
+
+	pull := liveBrokerJSON(t, handler, http.MethodPost, "/api/v3/repos/"+repositoryName+"/pulls", fmt.Sprintf(`{"title":"%s pull","head":"%s","base":"%s","body":"temporary Broker mutation test"}`, prefix, branch, defaultBranch), http.StatusCreated)
+	pullNumber := jsonNumber(t, pull, "number")
+	liveBrokerJSON(t, handler, http.MethodPatch, fmt.Sprintf("/api/v3/repos/%s/pulls/%d", repositoryName, pullNumber), `{"state":"closed"}`, http.StatusOK)
+
+	tag := prefix + "-tag"
+	release := liveBrokerJSON(t, handler, http.MethodPost, "/api/v3/repos/"+repositoryName+"/releases", fmt.Sprintf(`{"tag_name":"%s","target_commitish":"%s","name":"%s","draft":true}`, tag, branch, prefix), http.StatusCreated)
+	releaseID := jsonNumber(t, release, "id")
+	liveBrokerJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/v3/repos/%s/releases/%d", repositoryName, releaseID), "", http.StatusNoContent)
+	deleteLiveGitHubRef(t, token, repositoryName, "tags/"+tag)
+
+	liveBrokerJSON(t, handler, http.MethodDelete, fmt.Sprintf("/api/v3/repos/%s/milestones/%d", repositoryName, milestoneNumber), "", http.StatusNoContent)
+	liveBrokerJSON(t, handler, http.MethodDelete, "/api/v3/repos/"+repositoryName+"/labels/"+labelName, "", http.StatusNoContent)
+}
+
+func ensureLiveDefaultBranch(t *testing.T, handler http.Handler, token, repositoryName, defaultBranch string) map[string]any {
+	t.Helper()
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.github.com/repos/"+repositoryName+"/git/ref/heads/"+defaultBranch, nil)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	if response.StatusCode == http.StatusOK {
+		var value map[string]any
+		require.NoError(t, json.Unmarshal(data, &value))
+		return value
+	}
+	require.Equal(t, http.StatusConflict, response.StatusCode, string(data))
+	content := base64.StdEncoding.EncodeToString([]byte("# GitHub Proxy Test Repository\n"))
+	liveBrokerJSON(t, handler, http.MethodPut, "/api/v3/repos/"+repositoryName+"/contents/README.md", fmt.Sprintf(`{"message":"Initialize Broker test fixture","content":"%s","branch":"%s"}`, content, defaultBranch), http.StatusCreated)
+	return liveGitHubJSON(t, token, http.MethodGet, "repos/"+repositoryName+"/git/ref/heads/"+defaultBranch, "", http.StatusOK)
+}
+
+func liveBrokerJSON(t *testing.T, handler http.Handler, method, requestPath, body string, status int) map[string]any {
+	t.Helper()
+	response := brokerRequest(t, handler, method, requestPath, body)
+	require.Equal(t, status, response.Code, response.Body.String())
+	if response.Body.Len() == 0 {
+		return nil
+	}
+	var value map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &value), response.Body.String())
+	return value
+}
+
+func liveGitHubJSON(t *testing.T, token, method, resourcePath, body string, status int) map[string]any {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	request, err := http.NewRequestWithContext(context.Background(), method, "https://api.github.com/"+resourcePath, reader)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	require.NoError(t, err)
+	require.Equal(t, status, response.StatusCode, string(data))
+	if len(data) == 0 {
+		return nil
+	}
+	var value map[string]any
+	require.NoError(t, json.Unmarshal(data, &value))
+	return value
+}
+
+func jsonNumber(t *testing.T, value map[string]any, field string) int64 {
+	t.Helper()
+	number, ok := value[field].(float64)
+	require.True(t, ok, "response field %s must be numeric", field)
+	return int64(number)
+}
+
+func deleteLiveGitHubResource(t *testing.T, token, resourcePath string) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodDelete, "https://api.github.com/"+path.Clean(resourcePath), nil)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Errorf("delete temporary GitHub resource: %v", err)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		t.Errorf("delete temporary GitHub resource: status %d: %s", response.StatusCode, data)
+	}
+}
+
+func closeLiveGitHubIssue(t *testing.T, token, repositoryName string, number int64) {
+	t.Helper()
+	liveGitHubJSON(t, token, http.MethodPatch, fmt.Sprintf("repos/%s/issues/%d", repositoryName, number), `{"state":"closed"}`, http.StatusOK)
 }
 
 func requireLiveWriteOptIn(t *testing.T) {

@@ -34,16 +34,21 @@ fi
 
 cd "${repo_root}"
 
-go test ./cmd/pgh ./internal/pghcmd \
-  -run '^(TestPGHCommandSurfaceIsDiscoverable|TestRunnableCommandAuditManifestMatchesLiveCases)$' \
-  -count=1
-go test ./internal/pghcmd -run '^TestLivePGH' -count=1 -v
-go test ./internal/broker \
-  -run '^TestLive(GitHubReadCompatibility|GitSmartHTTPReadCompatibility)$' \
-  -count=1 -v
+if [[ "${PGH_LIVE_WRITES_ONLY:-}" != "1" ]]; then
+  go test ./cmd/pgh ./internal/pghcmd \
+    -run '^(TestPGHCommandSurfaceIsDiscoverable|TestRunnableCommandAuditManifestMatchesLiveCases)$' \
+    -count=1
+  go test ./internal/pghcmd -run '^TestLivePGH' -count=1 -v
+  go test ./internal/broker \
+    -run '^TestLive(GitHubReadCompatibility|GitSmartHTTPReadCompatibility)$' \
+    -count=1 -v
+fi
 
 if [[ "${PGH_LIVE_ALLOW_WRITES:-}" == "1" ]]; then
   : "${PGH_LIVE_DEFAULT_BRANCH:?PGH_LIVE_DEFAULT_BRANCH is required when PGH_LIVE_ALLOW_WRITES=1}"
+  go test ./internal/broker \
+    -run '^TestLiveRESTMutationCompatibility$' \
+    -count=1 -v
   go test ./internal/broker \
     -run '^TestLiveGitSmartHTTP(NonDefaultPush|TagPush)Compatibility$' \
     -count=1 -v

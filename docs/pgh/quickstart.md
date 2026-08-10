@@ -49,8 +49,7 @@ machine, then issue a short-lived token:
 docker compose exec pgh-broker pgh-broker capability issue \
   --credential operator-github \
   --repo OWNER/REPO \
-  --repository-id REPOSITORY_ID \
-  --default-branch main \
+  --expected-repository-id REPOSITORY_ID \
   --policy developer \
   --policy-version 1 \
   --git-push non-default \
@@ -111,9 +110,13 @@ kubectl create secret generic pgh-broker-encryption \
 
 helm upgrade --install pgh-broker deploy/helm/pgh-broker \
   --set image.repository=REGISTRY/pgh-broker \
-  --set image.tag=IMAGE_TAG
+  --set image.digest=sha256:IMAGE_MANIFEST_DIGEST
 ```
 
-The chart creates a private `ClusterIP` Service and does not create an ingress.
-Configure your platform's TLS ingress or gateway separately, and restrict its
-clients to approved Agent Hosts.
+The chart creates a private `ClusterIP` Service. Its optional Ingress expects an
+existing TLS Secret and reverse proxy; its optional NetworkPolicy requires
+controller-specific ingress peers. Keep both disabled when the platform manages
+those objects separately. Before enabling the Ingress, configure that proxy's
+header, idle, total-duration, and deployment-wide rate controls and restrict its
+frontend to approved Agent Hosts. Production installs require an immutable image
+digest.

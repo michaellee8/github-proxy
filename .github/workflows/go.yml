@@ -9,6 +9,39 @@ permissions:
   contents: read
 
 jobs:
+  broker-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: pgh_test
+          POSTGRES_USER: pgh
+          POSTGRES_PASSWORD: pgh-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pgh -d pgh_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PGH_TEST_DATABASE_URL: postgresql://pgh:pgh-test-password@127.0.0.1:5432/pgh_test?sslmode=disable
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+
+      - name: Run Broker PostgreSQL integration tests
+        run: go test -race ./internal/broker -run TestPostgres -count=1
+
+      - name: Test rendered deployment manifests
+        run: script/test-pgh-deployment.sh
+
   build:
     strategy:
       fail-fast: false

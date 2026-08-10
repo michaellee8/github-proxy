@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -74,7 +73,7 @@ func (h *handler) serveGit(w http.ResponseWriter, req *http.Request, session Ses
 		return
 	}
 
-	upstreamURL, err := gitUpstreamURL(session.Repository.UpstreamHost, req.URL)
+	upstreamURL, err := gitUpstreamURL(session.Upstream.Host, req.URL)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Message: "upstream host is misconfigured", Code: "PGH_UPSTREAM_INVALID"})
 		return
@@ -86,7 +85,7 @@ func (h *handler) serveGit(w http.ResponseWriter, req *http.Request, session Ses
 	}
 	upstream.ContentLength = req.ContentLength
 	copyEndToEndHeaders(upstream.Header, req.Header)
-	upstream.SetBasicAuth("x-access-token", session.Repository.UpstreamToken)
+	upstream.SetBasicAuth("x-access-token", session.Upstream.Token)
 	response, err := h.transport.RoundTrip(upstream)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, errorResponse{Message: "GitHub request failed", Code: "PGH_UPSTREAM_ERROR"})
@@ -227,20 +226,11 @@ func authorizeLFS(req *http.Request, remainder string, policy GitPolicy) (io.Rea
 		}
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
-	if strings.Contains(remainder, "/locks") {
-		if req.Method == http.MethodGet {
-			return req.Body, nil
-		}
-		if !gitCanPush(policy) || req.Method == http.MethodDelete {
-			return nil, &lfsPolicyError{message: "Git LFS lock operation is not allowed"}
-		}
+	if remainder == "info/lfs/locks" && req.Method == http.MethodGet {
 		return req.Body, nil
 	}
-	if req.Method == http.MethodGet {
+	if (remainder == "info/lfs/locks" || remainder == "info/lfs/locks/verify") && req.Method == http.MethodPost && gitCanPush(policy) {
 		return req.Body, nil
 	}
-	if req.Method == http.MethodPut && gitCanPush(policy) {
-		return req.Body, nil
-	}
-	return nil, &lfsPolicyError{message: fmt.Sprintf("Git LFS %s is not allowed", req.Method)}
+	return nil, &lfsPolicyError{message: "Git LFS operation is not allowed"}
 }

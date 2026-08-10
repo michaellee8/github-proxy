@@ -2,7 +2,7 @@ name: pgh-broker
 
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
     environment:
       POSTGRES_DB: pgh
       POSTGRES_USER: pgh
@@ -23,6 +23,7 @@ services:
       dockerfile: Dockerfile.pgh-broker
     environment:
       PGH_ACTIVE_KEY_ID: ${PGH_ACTIVE_KEY_ID:?set PGH_ACTIVE_KEY_ID}
+      PGH_ALLOW_INSECURE_DATABASE: "true"
       PGH_DATABASE_URL: postgresql://pgh:${PGH_POSTGRES_PASSWORD:?set PGH_POSTGRES_PASSWORD}@postgres:5432/pgh?sslmode=disable
       PGH_ENCRYPTION_KEYS: ${PGH_ENCRYPTION_KEYS:?set PGH_ENCRYPTION_KEYS}
       PGH_LISTEN_ADDR: 0.0.0.0:8080

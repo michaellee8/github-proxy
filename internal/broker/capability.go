@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,12 +30,13 @@ type SealedCredential struct {
 
 // StoredCredential contains the non-secret upstream settings and encrypted PAT.
 type StoredCredential struct {
-	ID           string
-	Name         string
-	UpstreamHost string
-	APIBaseURL   string
-	APIVersion   string
-	Token        SealedCredential
+	ID                   string
+	Name                 string
+	UpstreamHost         string
+	APIBaseURL           string
+	APIVersion           string
+	RepositoryResolution string
+	Token                SealedCredential
 }
 
 // StoredCapability is the persistence representation resolved by a CapabilityStore.
@@ -55,6 +57,7 @@ type CapabilityStore interface {
 	CredentialByName(context.Context, string) (StoredCredential, error)
 	CreateCapability(context.Context, StoredCapability) error
 	CapabilityBySelector(context.Context, string) (StoredCapability, error)
+	UpdateRepositoryObservation(context.Context, string, Repository) error
 }
 
 // CredentialCipher encrypts Upstream Credentials with a rotatable keyring.
@@ -82,8 +85,8 @@ func NewCredentialCipher(activeKeyID string, keys map[string][]byte, random io.R
 	return &CredentialCipher{activeKeyID: activeKeyID, keys: keyring, random: random}, nil
 }
 
-// Encrypt seals a PAT without retaining the plaintext input.
-func (c *CredentialCipher) Encrypt(plaintext []byte) (SealedCredential, error) {
+// EncryptCredential seals a PAT and binds it to its non-secret destination metadata.
+func (c *CredentialCipher) EncryptCredential(credential StoredCredential, plaintext []byte) (SealedCredential, error) {
 	aead, err := c.aead(c.activeKeyID)
 	if err != nil {
 		return SealedCredential{}, err
@@ -92,21 +95,29 @@ func (c *CredentialCipher) Encrypt(plaintext []byte) (SealedCredential, error) {
 	if _, err := io.ReadFull(c.random, nonce); err != nil {
 		return SealedCredential{}, fmt.Errorf("generate credential nonce: %w", err)
 	}
-	ciphertext := aead.Seal(nil, nonce, plaintext, []byte(c.activeKeyID))
+	ciphertext := aead.Seal(nil, nonce, plaintext, credentialAssociatedData(credential, c.activeKeyID))
 	return SealedCredential{KeyID: c.activeKeyID, Nonce: nonce, Ciphertext: ciphertext}, nil
 }
 
-// Decrypt opens an Upstream Credential just before an authorized request.
-func (c *CredentialCipher) Decrypt(sealed SealedCredential) ([]byte, error) {
-	aead, err := c.aead(sealed.KeyID)
+// DecryptCredential opens a PAT only when its destination metadata is unchanged.
+func (c *CredentialCipher) DecryptCredential(credential StoredCredential) ([]byte, error) {
+	aead, err := c.aead(credential.Token.KeyID)
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := aead.Open(nil, sealed.Nonce, sealed.Ciphertext, []byte(sealed.KeyID))
+	plaintext, err := aead.Open(nil, credential.Token.Nonce, credential.Token.Ciphertext, credentialAssociatedData(credential, credential.Token.KeyID))
 	if err != nil {
 		return nil, errors.New("decrypt upstream credential")
 	}
 	return plaintext, nil
+}
+
+func credentialAssociatedData(credential StoredCredential, keyID string) []byte {
+	data, _ := json.Marshal([]string{
+		"pgh-credential-v1", keyID, credential.ID, credential.Name, credential.UpstreamHost,
+		credential.APIBaseURL, credential.APIVersion, credential.RepositoryResolution,
+	})
+	return data
 }
 
 func (c *CredentialCipher) aead(keyID string) (cipher.AEAD, error) {
@@ -124,7 +135,7 @@ func (c *CredentialCipher) aead(keyID string) (cipher.AEAD, error) {
 // IssueRequest describes one immutable Repository Capability.
 type IssueRequest struct {
 	CredentialName string
-	Repository     Repository
+	Repository     RepositoryRequest
 	Policy         Policy
 	ExpiresAt      *time.Time
 }
@@ -137,24 +148,40 @@ type IssuedCapability struct {
 
 // CapabilityIssuer creates opaque capabilities for the offline admin interface.
 type CapabilityIssuer struct {
-	store  CapabilityStore
-	random io.Reader
-	now    func() time.Time
+	store    CapabilityStore
+	cipher   *CredentialCipher
+	resolver *RepositoryResolver
+	random   io.Reader
+	now      func() time.Time
 }
 
 // NewCapabilityIssuer constructs an issuer over the privileged persistence boundary.
-func NewCapabilityIssuer(store CapabilityStore, random io.Reader, now func() time.Time) *CapabilityIssuer {
-	return &CapabilityIssuer{store: store, random: random, now: now}
+func NewCapabilityIssuer(store CapabilityStore, cipher *CredentialCipher, resolver *RepositoryResolver, random io.Reader, now func() time.Time) *CapabilityIssuer {
+	return &CapabilityIssuer{store: store, cipher: cipher, resolver: resolver, random: random, now: now}
 }
 
 // Issue creates a repository-bound capability and returns its bearer token once.
 func (i *CapabilityIssuer) Issue(ctx context.Context, request IssueRequest) (IssuedCapability, error) {
-	if i.store == nil || i.random == nil || request.CredentialName == "" || request.Repository.ID <= 0 || request.Repository.Owner == "" || request.Repository.Name == "" || request.Policy.Name == "" || request.Policy.Version <= 0 {
+	if i.store == nil || i.random == nil || request.CredentialName == "" || request.Repository.Owner == "" || request.Repository.Name == "" || request.Policy.Name == "" || request.Policy.Version <= 0 {
 		return IssuedCapability{}, errors.New("complete credential, repository, and policy settings are required")
+	}
+	if err := ValidatePolicy(request.Policy); err != nil {
+		return IssuedCapability{}, err
 	}
 	credential, err := i.store.CredentialByName(ctx, request.CredentialName)
 	if err != nil {
 		return IssuedCapability{}, fmt.Errorf("load upstream credential: %w", err)
+	}
+	if i.cipher == nil || i.resolver == nil {
+		return IssuedCapability{}, errors.New("repository resolver is unavailable")
+	}
+	plaintext, err := i.cipher.DecryptCredential(credential)
+	if err != nil {
+		return IssuedCapability{}, errors.New("decrypt upstream credential")
+	}
+	repository, err := i.resolver.ResolveByName(ctx, upstreamAccess(credential, plaintext), request.Repository)
+	if err != nil {
+		return IssuedCapability{}, fmt.Errorf("resolve target repository: %w", err)
 	}
 	selectorBytes := make([]byte, 12)
 	secretBytes := make([]byte, 32)
@@ -169,7 +196,7 @@ func (i *CapabilityIssuer) Issue(ctx context.Context, request IssueRequest) (Iss
 	id := "cap_" + selector
 	stored := StoredCapability{
 		ID: id, Selector: selector, SecretHash: hashCapabilitySecret(secret), CredentialID: credential.ID, Credential: credential,
-		Repository: request.Repository, Policy: request.Policy, ExpiresAt: request.ExpiresAt,
+		Repository: repository, Policy: request.Policy, ExpiresAt: request.ExpiresAt,
 	}
 	if err := i.store.CreateCapability(ctx, stored); err != nil {
 		return IssuedCapability{}, fmt.Errorf("store capability: %w", err)
@@ -177,18 +204,26 @@ func (i *CapabilityIssuer) Issue(ctx context.Context, request IssueRequest) (Iss
 	return IssuedCapability{ID: id, Token: "pgh_pat_" + selector + "." + secret}, nil
 }
 
+func upstreamAccess(credential StoredCredential, plaintext []byte) UpstreamAccess {
+	return UpstreamAccess{
+		CredentialID: credential.ID, Host: credential.UpstreamHost, APIBaseURL: credential.APIBaseURL,
+		APIVersion: credential.APIVersion, RepositoryResolution: credential.RepositoryResolution, Token: string(plaintext),
+	}
+}
+
 type capabilityAuthority struct {
-	store  CapabilityStore
-	cipher *CredentialCipher
-	now    func() time.Time
+	store    CapabilityStore
+	cipher   *CredentialCipher
+	resolver *RepositoryResolver
+	now      func() time.Time
 }
 
 // NewCapabilityAuthority constructs the request-time capability resolver.
-func NewCapabilityAuthority(store CapabilityStore, cipher *CredentialCipher, now func() time.Time) Authority {
-	return &capabilityAuthority{store: store, cipher: cipher, now: now}
+func NewCapabilityAuthority(store CapabilityStore, cipher *CredentialCipher, resolver *RepositoryResolver, now func() time.Time) Authority {
+	return &capabilityAuthority{store: store, cipher: cipher, resolver: resolver, now: now}
 }
 
-func (a *capabilityAuthority) Resolve(ctx context.Context, token string) (Session, error) {
+func (a *capabilityAuthority) Resolve(ctx context.Context, token string, freshness RepositoryFreshness) (Session, error) {
 	selector, secret, ok := parseCapabilityToken(token)
 	if !ok || a.store == nil || a.cipher == nil || a.now == nil {
 		return Session{}, ErrCapabilityInvalid
@@ -201,16 +236,33 @@ func (a *capabilityAuthority) Resolve(ctx context.Context, token string) (Sessio
 	if stored.RevokedAt != nil || (stored.ExpiresAt != nil && !stored.ExpiresAt.After(now)) {
 		return Session{}, ErrCapabilityInvalid
 	}
-	plaintext, err := a.cipher.Decrypt(stored.Credential.Token)
+	if err := ValidatePolicy(stored.Policy); err != nil {
+		return Session{}, ErrCapabilityInvalid
+	}
+	plaintext, err := a.cipher.DecryptCredential(stored.Credential)
 	if err != nil {
 		return Session{}, ErrCapabilityInvalid
 	}
-	repository := stored.Repository
-	repository.UpstreamHost = stored.Credential.UpstreamHost
-	repository.APIBaseURL = stored.Credential.APIBaseURL
-	repository.APIVersion = stored.Credential.APIVersion
-	repository.UpstreamToken = string(plaintext)
-	return Session{CapabilityID: stored.ID, Repository: repository, Policy: stored.Policy, ExpiresAt: stored.ExpiresAt}, nil
+	if a.resolver == nil {
+		return Session{}, ErrRepositoryIdentity
+	}
+	access := upstreamAccess(stored.Credential, plaintext)
+	repository, err := a.resolver.Resolve(ctx, access, stored.Repository, freshness)
+	if err != nil {
+		return Session{}, err
+	}
+	if repository != stored.Repository {
+		if err := a.store.UpdateRepositoryObservation(ctx, stored.CredentialID, repository); err != nil {
+			return Session{}, ErrRepositoryIdentity
+		}
+	}
+	return Session{
+		CapabilityID: stored.ID,
+		Repository:   repository,
+		Upstream:     access,
+		Policy:       stored.Policy,
+		ExpiresAt:    stored.ExpiresAt,
+	}, nil
 }
 
 func parseCapabilityToken(token string) (string, string, bool) {
@@ -219,7 +271,13 @@ func parseCapabilityToken(token string) (string, string, bool) {
 		return "", "", false
 	}
 	selector, secret, ok := strings.Cut(remainder, ".")
-	if !ok || selector == "" || secret == "" || strings.Contains(secret, ".") {
+	if !ok || selector == "" || secret == "" || len(selector) > 64 || len(secret) > 128 || strings.Contains(secret, ".") {
+		return "", "", false
+	}
+	if _, err := base64.RawURLEncoding.DecodeString(selector); err != nil {
+		return "", "", false
+	}
+	if _, err := base64.RawURLEncoding.DecodeString(secret); err != nil {
 		return "", "", false
 	}
 	return selector, secret, true

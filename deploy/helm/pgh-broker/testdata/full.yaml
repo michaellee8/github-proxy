@@ -1,0 +1,16 @@
+image:
+  repository: registry.example/pgh-broker
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+ingress:
+  enabled: true
+  className: internal-nginx
+  host: broker.example.internal
+  tlsSecretName: wildcard-example-internal
+
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx

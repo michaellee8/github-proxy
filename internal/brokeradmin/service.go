@@ -16,27 +16,32 @@ import (
 // Store is the privileged persistence adapter used by the offline service.
 type Store interface {
 	broker.CapabilityStore
+	broker.AuditArchive
 	PutCredential(context.Context, broker.StoredCredential) error
 	RevokeCapability(context.Context, string, time.Time) error
 }
 
 // AdminService encrypts credentials and manages Repository Capabilities.
 type AdminService struct {
-	store  Store
-	cipher *broker.CredentialCipher
-	random io.Reader
-	now    func() time.Time
+	store    Store
+	cipher   *broker.CredentialCipher
+	resolver *broker.RepositoryResolver
+	random   io.Reader
+	now      func() time.Time
 }
 
 // NewAdminService constructs the offline credential and capability service.
-func NewAdminService(store Store, cipher *broker.CredentialCipher, random io.Reader, now func() time.Time) *AdminService {
-	return &AdminService{store: store, cipher: cipher, random: random, now: now}
+func NewAdminService(store Store, cipher *broker.CredentialCipher, resolver *broker.RepositoryResolver, random io.Reader, now func() time.Time) *AdminService {
+	return &AdminService{store: store, cipher: cipher, resolver: resolver, random: random, now: now}
 }
 
 // PutCredential encrypts and stores an upstream GitHub credential.
 func (s *AdminService) PutCredential(ctx context.Context, request PutCredentialRequest) error {
 	if s.store == nil || s.cipher == nil || s.random == nil || request.Name == "" || request.UpstreamHost == "" || len(request.Token) == 0 {
 		return errors.New("complete upstream credential settings are required")
+	}
+	if request.RepositoryResolution != broker.RepositoryResolutionNumeric && request.RepositoryResolution != broker.RepositoryResolutionName {
+		return errors.New("repository resolution must be numeric-id or owner-name")
 	}
 	apiBase, err := url.Parse(request.APIBaseURL)
 	if err != nil || apiBase.Scheme != "https" || apiBase.Host == "" || apiBase.User != nil || apiBase.RawQuery != "" || apiBase.Fragment != "" {
@@ -45,24 +50,35 @@ func (s *AdminService) PutCredential(ctx context.Context, request PutCredentialR
 	if !strings.EqualFold(apiBase.Hostname(), request.UpstreamHost) && !(strings.EqualFold(request.UpstreamHost, "github.com") && strings.EqualFold(apiBase.Hostname(), "api.github.com")) {
 		return errors.New("API base URL must belong to the upstream host")
 	}
-	sealed, err := s.cipher.Encrypt(request.Token)
-	if err != nil {
-		return fmt.Errorf("encrypt upstream credential: %w", err)
+	credentialID := ""
+	existing, err := s.store.CredentialByName(ctx, request.Name)
+	if err == nil {
+		credentialID = existing.ID
+	} else if !errors.Is(err, broker.ErrCredentialNotFound) {
+		return fmt.Errorf("load upstream credential: %w", err)
 	}
-	idBytes := make([]byte, 12)
-	if _, err := io.ReadFull(s.random, idBytes); err != nil {
-		return fmt.Errorf("generate credential ID: %w", err)
+	if credentialID == "" {
+		idBytes := make([]byte, 12)
+		if _, err := io.ReadFull(s.random, idBytes); err != nil {
+			return fmt.Errorf("generate credential ID: %w", err)
+		}
+		credentialID = "cred_" + base64.RawURLEncoding.EncodeToString(idBytes)
 	}
 	credential := broker.StoredCredential{
-		ID: "cred_" + base64.RawURLEncoding.EncodeToString(idBytes), Name: request.Name,
-		UpstreamHost: request.UpstreamHost, APIBaseURL: request.APIBaseURL, APIVersion: request.APIVersion, Token: sealed,
+		ID: credentialID, Name: request.Name,
+		UpstreamHost: request.UpstreamHost, APIBaseURL: request.APIBaseURL, APIVersion: request.APIVersion,
+		RepositoryResolution: request.RepositoryResolution,
+	}
+	credential.Token, err = s.cipher.EncryptCredential(credential, request.Token)
+	if err != nil {
+		return fmt.Errorf("encrypt upstream credential: %w", err)
 	}
 	return s.store.PutCredential(ctx, credential)
 }
 
 // Issue creates a repository-bound capability and returns its token once.
 func (s *AdminService) Issue(ctx context.Context, request broker.IssueRequest) (broker.IssuedCapability, error) {
-	issuer := broker.NewCapabilityIssuer(s.store, s.random, s.now)
+	issuer := broker.NewCapabilityIssuer(s.store, s.cipher, s.resolver, s.random, s.now)
 	return issuer.Issue(ctx, request)
 }
 
@@ -72,6 +88,14 @@ func (s *AdminService) Revoke(ctx context.Context, id string) error {
 		return errors.New("admin service is unavailable")
 	}
 	return s.store.RevokeCapability(ctx, id, s.now())
+}
+
+// ListAuditEvents returns redacted request records for offline inspection.
+func (s *AdminService) ListAuditEvents(ctx context.Context, query broker.AuditQuery) ([]broker.AuditEvent, error) {
+	if s.store == nil {
+		return nil, errors.New("admin service is unavailable")
+	}
+	return s.store.ListAuditEvents(ctx, query)
 }
 
 var _ Service = (*AdminService)(nil)

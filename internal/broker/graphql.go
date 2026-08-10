@@ -117,7 +117,7 @@ func (h *handler) serveGraphQL(w http.ResponseWriter, req *http.Request, session
 		return
 	}
 
-	endpoint, err := graphQLEndpoint(session.Repository.APIBaseURL)
+	endpoint, err := graphQLEndpoint(session.Upstream.APIBaseURL)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Message: "upstream host is misconfigured", Code: "PGH_UPSTREAM_INVALID"})
 		return
@@ -133,7 +133,7 @@ func (h *handler) serveGraphQL(w http.ResponseWriter, req *http.Request, session
 		return
 	}
 	copyEndToEndHeaders(upstream.Header, req.Header)
-	upstream.Header.Set("Authorization", "Bearer "+session.Repository.UpstreamToken)
+	upstream.Header.Set("Authorization", "Bearer "+session.Upstream.Token)
 	upstream.Header.Set("Content-Type", "application/json")
 
 	responseFromGitHub, err := h.transport.RoundTrip(upstream)

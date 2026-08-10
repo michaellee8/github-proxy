@@ -7,6 +7,11 @@ receives the GitHub PAT. `pgh` prevents accidental direct GitHub access, but it
 is not the authorization boundary. The Broker and its PostgreSQL database are
 trusted and must run outside the Agent Host.
 
+The Broker guarantees direct containment: it forwards authenticated requests
+only to the Target Repository. GitHub-side effects caused by permitted work,
+including notifications, Actions, integrations, and other repository
+automation, are outside that containment guarantee.
+
 ```text
 Agent Host               Trusted network                  GitHub
 
@@ -27,7 +32,11 @@ directly to PostgreSQL. There is no administrative HTTP API.
 - Only a SHA-256 hash of the capability secret is stored. Tokens can expire and
   can be revoked immediately.
 - Upstream Credentials are encrypted with AES-256-GCM and a named key before
-  storage. Plaintext is recovered only for an authorized upstream request.
+  storage. The ciphertext is authenticated against the credential ID and
+  upstream destination metadata. Plaintext is recovered only for an authorized
+  upstream request.
+- Target Repository identity is revalidated before every mutation. Reads use a
+  short successful-observation cache, never stale data after a refresh error.
 - REST requests must use a registered method and repository-relative path. The
   Broker rebuilds the upstream URL from trusted repository data and replaces
   client authorization headers. REST Git-ref writes use the same branch and tag
@@ -44,6 +53,12 @@ directly to PostgreSQL. There is no administrative HTTP API.
   receive-pack ref commands, rejects ref deletion, and applies branch and tag
   policy before streaming pack data.
 - Git LFS operations use the same repository binding and Git write policy.
+- Redacted request audits go to PostgreSQL and structured JSON logs. A mutation
+  is denied unless its preflight event is durable; a read may continue during a
+  database audit outage only after its structured event is emitted.
+- Every replica applies separate per-capability read and mutation rates plus a
+  concurrency ceiling. The reverse proxy owns deployment-wide limits and
+  request duration.
 - `pgh` sends capability-bearing HTTP only over HTTPS to the exact configured
   broker authority. Alternate ports, redirects to another authority, and direct
   GitHub destinations fail closed.
@@ -70,8 +85,8 @@ make autonomous code changes safe by itself.
 - The `developer` profile permits issue, pull request, label, and milestone
   mutations. Agent actions can still notify people, trigger automation, consume
   quotas, or disclose repository data through permitted channels.
-- The Broker does not yet provide audit events, per-capability rate limits, or
-  semantic commit quarantine.
+- The Broker does not provide semantic commit quarantine. A permitted Git push
+  is treated as workflow-capable regardless of which files it changes.
 - `/healthz` proves that the process is serving HTTP. It does not continuously
   test PostgreSQL or GitHub connectivity.
 

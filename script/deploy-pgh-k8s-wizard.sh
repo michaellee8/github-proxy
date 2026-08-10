@@ -266,7 +266,7 @@ validate_grants() {
   local grant
   for grant in "$@"; do
     case "$grant" in
-      actions.write|checks.write|contents.write|deployments.write|objects.delete|releases.write) ;;
+      actions.write|checks.write|contents.write|deployments.write|objects.delete|pulls.merge|pulls.review.dismiss|releases.write) ;;
       *) die "unknown grant: $grant" ;;
     esac
   done
@@ -316,7 +316,7 @@ kubectl_cluster create namespace "$KUBE_NAMESPACE" --dry-run=client -o yaml |
   kubectl_cluster apply -f -
 
 stage "Build and publish image"
-say "Use an immutable image tag. The default is the full source commit."
+say "Publish an image, then resolve and deploy its immutable manifest digest."
 ask IMAGE_REPOSITORY "Image repository, for example registry.example.com/platform/pgh-broker:"
 require_value "image repository" "$IMAGE_REPOSITORY"
 [[ "$IMAGE_REPOSITORY" != *[[:space:]]* ]] || die "image repository cannot contain whitespace"
@@ -352,6 +352,11 @@ else
     --push \
     "$REPO_ROOT"
 fi
+IMAGE_DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" | awk '$1 == "Digest:" { print $2; exit }')
+[[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || die "could not resolve an immutable sha256 digest for $IMAGE_REF"
+IMAGE_PINNED_REF="$IMAGE_REPOSITORY@$IMAGE_DIGEST"
+write_env IMAGE_DIGEST "$IMAGE_DIGEST"
+note "pinned image: $IMAGE_PINNED_REF"
 
 stage "Database and encryption Secrets"
 say "Use an existing production PostgreSQL service and a keyring from your secret manager."
@@ -360,14 +365,8 @@ ask_secret PGH_DATABASE_URL "PostgreSQL URL:"
 require_value "PostgreSQL URL" "$PGH_DATABASE_URL"
 [[ "$PGH_DATABASE_URL" == postgres://* || "$PGH_DATABASE_URL" == postgresql://* ]] ||
   die "PostgreSQL URL must use postgres:// or postgresql://"
-[[ "$PGH_DATABASE_URL" != *"sslmode=disable"* ]] || die "sslmode=disable is not accepted for this deployment"
-if [[ "$PGH_DATABASE_URL" != *"sslmode=require"* &&
-      "$PGH_DATABASE_URL" != *"sslmode=verify-ca"* &&
-      "$PGH_DATABASE_URL" != *"sslmode=verify-full"* ]]; then
-  warn "The URL does not declare sslmode=require, verify-ca, or verify-full."
-  confirm "The database connection is otherwise TLS-protected and you want to continue?" ||
-    die "stopped before storing the database URL"
-fi
+[[ "$PGH_DATABASE_URL" =~ [\?\&]sslmode=verify-full([\&].*)?$ ]] ||
+  die "production PostgreSQL URL must declare sslmode=verify-full"
 [[ -n "$(_existing PGH_ACTIVE_KEY_ID || true)" ]] ||
   write_env PGH_ACTIVE_KEY_ID "key-$(date -u +%Y-%m)"
 ask PGH_ACTIVE_KEY_ID "Active encryption key ID:"
@@ -405,7 +404,7 @@ stage "Render and review"
 say "Render locally, lint the chart, and show the server-side object diff before deployment."
 HELM_VALUE_ARGS=(
   --set-string "image.repository=$IMAGE_REPOSITORY"
-  --set-string "image.tag=$IMAGE_TAG"
+  --set-string "image.digest=$IMAGE_DIGEST"
   --set-string "podAnnotations.pgh\\.github-proxy/deployment-revision=$DEPLOYMENT_REVISION"
 )
 if [[ -n "$IMAGE_PULL_SECRET" ]]; then
@@ -428,7 +427,7 @@ fi
 note "context: $KUBE_CONTEXT"
 note "namespace: $KUBE_NAMESPACE"
 note "release: $HELM_RELEASE"
-note "image: $IMAGE_REF"
+note "image: $IMAGE_PINNED_REF"
 pause "Review the diff above. Press Enter when ready for the deployment approval."
 
 stage "Deploy Broker"
@@ -456,22 +455,26 @@ kubectl_ns rollout status "deployment/$DEPLOYMENT_NAME" --timeout=10m
 helm status "$HELM_RELEASE" --kube-context "$KUBE_CONTEXT" --namespace "$KUBE_NAMESPACE"
 
 stage "TLS ingress"
-say "Create a standard HTTPS Ingress using an existing controller and TLS Secret."
+say "Create a standard HTTPS Ingress using an existing controller and TLS Secret. The controller remains responsible for the Broker's external network and request limits."
 kubectl_cluster get ingressclass
 ask PGH_HOST "Broker hostname, without https://:"
 validate_hostname "$PGH_HOST"
 ask INGRESS_CLASS "Existing IngressClass name:"
 validate_dns_subdomain "IngressClass" "$INGRESS_CLASS"
+ask INGRESS_NAMESPACE "Namespace containing the Ingress controller:"
+validate_dns_label "Ingress controller namespace" "$INGRESS_NAMESPACE"
 ask INGRESS_TLS_SECRET "Existing TLS Secret name:"
 validate_dns_label "TLS Secret" "$INGRESS_TLS_SECRET"
 [[ -n "$(_existing INGRESS_NAME || true)" ]] || write_env INGRESS_NAME "$HELM_RELEASE-pgh"
 ask INGRESS_NAME "Ingress object name:"
 validate_dns_label "Ingress name" "$INGRESS_NAME"
 kubectl_cluster get ingressclass "$INGRESS_CLASS" >/dev/null 2>&1 || die "IngressClass does not exist"
+kubectl_cluster get namespace "$INGRESS_NAMESPACE" >/dev/null 2>&1 || die "Ingress controller namespace does not exist"
 TLS_SECRET_TYPE=$(kubectl_ns get secret "$INGRESS_TLS_SECRET" -o jsonpath='{.type}' 2>/dev/null || true)
 [[ "$TLS_SECRET_TYPE" == kubernetes.io/tls ]] || die "TLS Secret is missing or is not kubernetes.io/tls"
 write_env PGH_HOST "$PGH_HOST"
 write_env INGRESS_CLASS "$INGRESS_CLASS"
+write_env INGRESS_NAMESPACE "$INGRESS_NAMESPACE"
 write_env INGRESS_TLS_SECRET "$INGRESS_TLS_SECRET"
 write_env INGRESS_NAME "$INGRESS_NAME"
 ensure_tmp_dir
@@ -500,16 +503,62 @@ spec:
                 port:
                   number: 8080
 EOF
+NETWORK_POLICY_MANIFEST="$WIZARD_TMP_DIR/network-policy.yaml"
+cat > "$NETWORK_POLICY_MANIFEST" <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: $HELM_RELEASE-ingress
+  namespace: $KUBE_NAMESPACE
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgh-broker
+      app.kubernetes.io/instance: $HELM_RELEASE
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: $INGRESS_NAMESPACE
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 5432
+EOF
 if kubectl_ns diff -f "$INGRESS_MANIFEST"; then
   note "No Ingress change detected."
 else
   DIFF_STATUS=$?
   [[ "$DIFF_STATUS" -eq 1 ]] || die "Ingress diff failed with status $DIFF_STATUS"
 fi
-warn "Ingress reachability is controlled by your controller and network policy, not by this manifest."
-step "Confirm the controller is restricted to approved Agent Hosts before exposing the Broker."
-confirm "Apply this HTTPS Ingress?" || die "stopped before Ingress mutation"
-kubectl_ns apply -f "$INGRESS_MANIFEST"
+if kubectl_ns diff -f "$NETWORK_POLICY_MANIFEST"; then
+  note "No NetworkPolicy change detected."
+else
+  DIFF_STATUS=$?
+  [[ "$DIFF_STATUS" -eq 1 ]] || die "NetworkPolicy diff failed with status $DIFF_STATUS"
+fi
+warn "The NetworkPolicy allows only the selected Ingress namespace inbound and DNS, HTTPS, and PostgreSQL ports outbound."
+step "Inspect the existing reverse proxy before exposing the Broker. It must enforce header, idle, and total-duration limits plus a deployment-wide request rate."
+confirm "Does the reverse proxy enforce all four request controls for this hostname?" ||
+  die "configure reverse-proxy request controls before exposing the Broker"
+step "For a NetBird deployment, confirm the controller frontend and DNS name are reachable only by approved NetBird peers. Capability Tokens remain the application authentication layer."
+confirm "Is this hostname restricted to the approved Agent Host network?" ||
+  die "restrict the Ingress controller before exposing the Broker"
+confirm "Apply this HTTPS Ingress and NetworkPolicy?" || die "stopped before network mutation"
+kubectl_ns apply -f "$INGRESS_MANIFEST" -f "$NETWORK_POLICY_MANIFEST"
 HEALTH_READY=false
 for _ in 1 2 3 4 5 6; do
   if curl --fail --silent --show-error --max-time 10 "https://$PGH_HOST/healthz" >/dev/null; then
@@ -542,15 +591,12 @@ printf '%s\n' "$PGH_OPERATOR_PAT" |
 unset PGH_OPERATOR_PAT
 
 stage "Issue repository capability"
-say "Issue one short-lived token bound to an immutable GitHub repository ID and explicit policy."
+say "Issue one token bound to an immutable GitHub repository ID and explicit policy."
 ask TARGET_REPOSITORY "Repository as OWNER/NAME:"
 [[ "$TARGET_REPOSITORY" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] ||
   die "repository must be exactly OWNER/NAME"
 ask TARGET_REPOSITORY_ID "Immutable GitHub repository ID:"
 [[ "$TARGET_REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || die "repository ID must be a positive integer"
-[[ -n "$(_existing TARGET_DEFAULT_BRANCH || true)" ]] || write_env TARGET_DEFAULT_BRANCH "main"
-ask TARGET_DEFAULT_BRANCH "Default branch:"
-require_value "default branch" "$TARGET_DEFAULT_BRANCH"
 [[ -n "$(_existing TARGET_POLICY || true)" ]] || write_env TARGET_POLICY "developer"
 ask TARGET_POLICY "Policy profile:"
 require_value "policy profile" "$TARGET_POLICY"
@@ -571,12 +617,16 @@ else
   GRANTS=()
 fi
 [[ -n "$(_existing TARGET_EXPIRES_IN || true)" ]] || write_env TARGET_EXPIRES_IN "8h"
-ask TARGET_EXPIRES_IN "Capability lifetime, for example 8h:"
-[[ "$TARGET_EXPIRES_IN" =~ ^[1-9][0-9]*(ns|us|µs|ms|s|m|h)$ ]] ||
-  die "capability lifetime must be one positive Go duration component, such as 30m or 8h"
+ask TARGET_EXPIRES_IN "Capability lifetime, for example 8h, or none:"
+if [[ "$TARGET_EXPIRES_IN" == none ]]; then
+  warn "A capability without expiration remains usable until an operator revokes it."
+  confirm "Issue a non-expiring capability?" || die "choose a finite capability lifetime"
+else
+  [[ "$TARGET_EXPIRES_IN" =~ ^[1-9][0-9]*(ns|us|ms|s|m|h)$ ]] ||
+    die "capability lifetime must be one positive Go duration component, such as 30m or 8h, or none"
+fi
 write_env TARGET_REPOSITORY "$TARGET_REPOSITORY"
 write_env TARGET_REPOSITORY_ID "$TARGET_REPOSITORY_ID"
-write_env TARGET_DEFAULT_BRANCH "$TARGET_DEFAULT_BRANCH"
 write_env TARGET_POLICY "$TARGET_POLICY"
 write_env TARGET_POLICY_VERSION "$TARGET_POLICY_VERSION"
 write_env TARGET_GIT_PUSH "$TARGET_GIT_PUSH"
@@ -587,13 +637,14 @@ ISSUE_COMMAND=(
   pgh-broker capability issue
   --credential "$PGH_CREDENTIAL_NAME"
   --repo "$TARGET_REPOSITORY"
-  --repository-id "$TARGET_REPOSITORY_ID"
-  --default-branch "$TARGET_DEFAULT_BRANCH"
+  --expected-repository-id "$TARGET_REPOSITORY_ID"
   --policy "$TARGET_POLICY"
   --policy-version "$TARGET_POLICY_VERSION"
   --git-push "$TARGET_GIT_PUSH"
-  --expires-in "$TARGET_EXPIRES_IN"
 )
+if [[ "$TARGET_EXPIRES_IN" != none ]]; then
+  ISSUE_COMMAND+=(--expires-in "$TARGET_EXPIRES_IN")
+fi
 if [[ "$TARGET_GIT_TAGS" == true ]]; then
   ISSUE_COMMAND+=(--git-tags)
 fi

@@ -18,7 +18,7 @@ func TestBrokerForwardsRegisteredRepositoryGraphQLQuery(t *testing.T) {
 		Query     string         `json:"query"`
 		Variables map[string]any `json:"variables"`
 	}
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			upstreamRequest = req.Clone(req.Context())
@@ -55,7 +55,7 @@ func TestBrokerForwardsRegisteredRepositoryGraphQLQuery(t *testing.T) {
 
 func TestBrokerSupportsPinnedGHRepositoryReadFamilies(t *testing.T) {
 	var variables map[string]any
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			var payload graphQLRequest
@@ -80,7 +80,7 @@ func TestBrokerSupportsPinnedGHRepositoryReadFamilies(t *testing.T) {
 }
 
 func TestBrokerSupportsPinnedGHRepositoryIssueTypesQuery(t *testing.T) {
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -104,7 +104,7 @@ func TestBrokerSupportsPinnedGHRepositoryIssueTypesQuery(t *testing.T) {
 }
 
 func TestBrokerSupportsPinnedGHReleaseListQuery(t *testing.T) {
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -128,7 +128,7 @@ func TestBrokerSupportsPinnedGHReleaseListQuery(t *testing.T) {
 }
 
 func TestBrokerSupportsPinnedGHReleaseFeatureProbe(t *testing.T) {
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -287,7 +287,7 @@ func TestBrokerRejectsUnscopedGraphQLRequests(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handler := NewHandler(HandlerOptions{
+			handler := newTestHandler(t, HandlerOptions{
 				Authority: testAuthority(t),
 				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 					t.Fatal("denied GraphQL request must not call GitHub")
@@ -307,7 +307,7 @@ func TestBrokerRejectsUnscopedGraphQLRequests(t *testing.T) {
 }
 
 func TestBrokerLimitsGraphQLDocumentComplexity(t *testing.T) {
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			t.Fatal("oversized GraphQL document must not call GitHub")

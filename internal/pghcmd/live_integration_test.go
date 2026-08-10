@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,20 @@ type liveCommandAuthority struct {
 	session broker.Session
 }
 
-func (a liveCommandAuthority) Resolve(_ context.Context, token string) (broker.Session, error) {
+type liveCommandAuditStore struct{}
+
+func (liveCommandAuditStore) RecordAuditEvent(context.Context, broker.AuditEvent) error { return nil }
+
+func newLiveCommandHandler(t *testing.T, options broker.HandlerOptions) http.Handler {
+	t.Helper()
+	limiter, err := broker.NewLocalRequestLimiter(broker.LocalLimitOptions{ReadsPerMinute: 10_000, MutationsPerMinute: 10_000, Concurrent: 100})
+	require.NoError(t, err)
+	options.Auditor = broker.NewRequestAuditor(liveCommandAuditStore{}, broker.NewJSONAuditEmitter(io.Discard))
+	options.Limiter = limiter
+	return broker.NewHandler(options)
+}
+
+func (a liveCommandAuthority) Resolve(_ context.Context, token string, _ broker.RepositoryFreshness) (broker.Session, error) {
 	if token != "live-capability" {
 		return broker.Session{}, errors.New("unexpected capability token")
 	}
@@ -456,13 +470,13 @@ func TestLivePGHReadOnlyCommandAudit(t *testing.T) {
 		{name: "repo license list", args: []string{"repo", "license", "list"}, wantExitCode: 1, wantStderrContains: "operation is not allowed", wantRequestContains: []string{"GET /api/v3/licenses"}},
 		{name: "repo list", args: []string{"repo", "list", owner, "--limit", "1", "--json", "nameWithOwner"}, wantExitCode: 1, wantStderrContains: "operation is not registered", wantRequestContains: []string{"POST /api/graphql"}},
 		{name: "repo read-dir", args: []string{"repo", "read-dir", ".", "--repo", repositoryName}, wantExitCode: 1, wantStderrContains: "operation is not registered", wantRequestContains: []string{"POST /api/graphql"}},
-		{name: "repo read-file", args: []string{"repo", "read-file", "README.md", "--repo", repositoryName}, wantStdoutContains: "# GitHub CLI", wantRequestContains: []string{"GET /api/v3/repos/" + repositoryName + "/contents/README.md"}},
+		{name: "repo read-file", args: []string{"repo", "read-file", "pgh-command-audit-missing", "--repo", repositoryName}, wantExitCode: 1, wantStderrContains: "HTTP 404", wantRequestContains: []string{"GET /api/v3/repos/" + repositoryName + "/contents/pgh-command-audit-missing"}},
 		{name: "ruleset list", args: []string{"ruleset", "list", "--repo", repositoryName}, wantExitCode: 1, wantStderrContains: "operation is not registered", wantRequestContains: []string{"POST /api/graphql"}},
 		{name: "search code", args: []string{"search", "code", "github-proxy", "--repo", repositoryName, "--limit", "1"}, wantExitCode: 1, wantStderrContains: "operation is not allowed", wantRequestContains: []string{"GET /api/v3/search/code"}},
 		{name: "secret list", args: []string{"secret", "list", "--repo", repositoryName}, wantExitCode: 1, wantStderrContains: "operation is not allowed", wantRequestContains: []string{"GET /api/v3/repos/" + repositoryName + "/actions/secrets"}},
 		{name: "skill search", args: []string{"skill", "search", "pgh", "--limit", "1"}, wantExitCode: 1, wantStderrContains: "GitHub Skills does not currently support GitHub Enterprise Server", wantNoRequests: true},
 		{name: "ssh-key list", args: []string{"ssh-key", "list"}, wantExitCode: 1, wantStderrContains: "operation is not allowed", wantRequestContains: []string{"GET /api/v3/user/keys", "GET /api/v3/user/ssh_signing_keys"}},
-		{name: "status", args: []string{"status"}, wantExitCode: 1, wantStderrContains: "operation is not registered", wantRequestContains: []string{"POST /api/graphql"}},
+		{name: "status", args: []string{"status"}, wantExitCode: 1, wantStderrContains: "operation is not", wantRequestContains: []string{"GET /api/v3/notifications"}},
 		{name: "variable list", args: []string{"variable", "list", "--repo", repositoryName}, wantExitCode: 1, wantStderrContains: "operation is not allowed", wantRequestContains: []string{"GET /api/v3/repos/" + repositoryName + "/actions/variables"}},
 		{name: "workflow view", args: []string{"workflow", "view", "pgh-command-audit-missing.yml", "--repo", repositoryName, "--yaml"}, wantExitCode: 1, wantStderrContains: "not found on the default branch", wantRequestContains: []string{"GET /api/v3/repos/" + repositoryName + "/actions/workflows/pgh-command-audit-missing.yml"}},
 	}
@@ -500,18 +514,16 @@ func TestLivePGHCommandHelper(t *testing.T) {
 	if os.Getenv(liveHelperEnvironment) != "1" {
 		t.Skip("live command helper runs only in a subprocess")
 	}
-	token := os.Getenv("PGH_LIVE_TOKEN")
+	token := readLiveUpstreamToken(t)
 	repositoryName := os.Getenv("PGH_LIVE_REPO")
 	owner, name, ok := strings.Cut(repositoryName, "/")
 	require.True(t, ok, "PGH_LIVE_REPO must be OWNER/NAME")
 
-	handler := broker.NewHandler(broker.HandlerOptions{Authority: liveCommandAuthority{session: broker.Session{
+	handler := newLiveCommandHandler(t, broker.HandlerOptions{Authority: liveCommandAuthority{session: broker.Session{
 		CapabilityID: "live-command-test",
-		Repository: broker.Repository{
-			Owner: owner, Name: name, UpstreamHost: "github.com", APIBaseURL: "https://api.github.com",
-			APIVersion: "2022-11-28", UpstreamToken: token,
-		},
-		Policy: broker.Policy{Name: "developer", Version: 1},
+		Repository:   broker.Repository{Owner: owner, Name: name},
+		Upstream:     broker.UpstreamAccess{Host: "github.com", APIBaseURL: "https://api.github.com", APIVersion: "2022-11-28", Token: token},
+		Policy:       broker.Policy{Name: "developer", Version: 1},
 	}}, Transport: liveReadOnlyTransport{base: http.DefaultTransport}})
 	os.Args = append([]string{"pgh"}, helperArguments(os.Args)...)
 	exitCode := mainWithOptions(mainOptions{HTTPClientWrapper: func(client *http.Client) *http.Client {
@@ -522,6 +534,21 @@ func TestLivePGHCommandHelper(t *testing.T) {
 		return client
 	}})
 	os.Exit(exitCode)
+}
+
+func readLiveUpstreamToken(t *testing.T) string {
+	t.Helper()
+	fd, err := strconv.Atoi(os.Getenv("PGH_LIVE_TOKEN_FD"))
+	require.NoError(t, err, "PGH_LIVE_TOKEN_FD must identify the one-shot credential pipe")
+	file := os.NewFile(uintptr(fd), "pgh-live-upstream-token")
+	require.NotNil(t, file)
+	data, err := io.ReadAll(io.LimitReader(file, 64*1024+1))
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	require.NoError(t, os.Unsetenv("PGH_LIVE_TOKEN_FD"))
+	require.NotEmpty(t, data)
+	require.LessOrEqual(t, len(data), 64*1024)
+	return string(data)
 }
 
 type liveCommandResult struct {
@@ -550,8 +577,16 @@ func runLivePGHWithOptions(t *testing.T, opts liveCommandOptions, arguments ...s
 	if opts.directory != "" {
 		command.Dir = opts.directory
 	}
-	command.Env = append(os.Environ(),
+	tokenReader, tokenWriter, err := os.Pipe()
+	require.NoError(t, err)
+	_, err = tokenWriter.Write([]byte(os.Getenv("PGH_LIVE_TOKEN")))
+	require.NoError(t, err)
+	require.NoError(t, tokenWriter.Close())
+	command.ExtraFiles = []*os.File{tokenReader}
+	command.Env = append(environmentWithout(os.Environ(),
+		"PGH_LIVE_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"),
 		liveHelperEnvironment+"=1",
+		"PGH_LIVE_TOKEN_FD=3",
 		"PGH_HOST=broker.test",
 		"PGH_TOKEN=live-capability",
 		"PGH_CONFIG_DIR="+t.TempDir(),
@@ -567,7 +602,8 @@ func runLivePGHWithOptions(t *testing.T, opts liveCommandOptions, arguments ...s
 	command.Stdin = strings.NewReader(opts.stdin)
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	err := command.Run()
+	err = command.Run()
+	require.NoError(t, tokenReader.Close())
 	require.NoError(t, ctx.Err(), "pgh command timed out: %s", strings.Join(arguments, " "))
 	exitCode := 0
 	if err != nil {
@@ -581,6 +617,21 @@ func runLivePGHWithOptions(t *testing.T, opts liveCommandOptions, arguments ...s
 	}
 	requests := strings.FieldsFunc(string(trace), func(r rune) bool { return r == '\n' || r == '\r' })
 	return liveCommandResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String(), requests: requests}
+}
+
+func environmentWithout(environment []string, names ...string) []string {
+	blocked := make(map[string]bool, len(names))
+	for _, name := range names {
+		blocked[name] = true
+	}
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if !blocked[name] {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func helperArguments(arguments []string) []string {

@@ -17,7 +17,7 @@ import (
 
 func TestBrokerScopesGitUploadPackWithBasicCapabilityAuth(t *testing.T) {
 	var upstream *http.Request
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			upstream = req.Clone(req.Context())
@@ -66,7 +66,7 @@ func TestBrokerEnforcesReceivePackRefPolicy(t *testing.T) {
 			var gotBody []byte
 			called := false
 			policy := Policy{Name: "developer", Version: 1, Git: tt.git}
-			handler := NewHandler(HandlerOptions{
+			handler := newTestHandler(t, HandlerOptions{
 				Authority: authorityWithPolicy(t, policy),
 				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 					called = true
@@ -98,7 +98,7 @@ func TestBrokerAcceptsShallowReceivePackPreamble(t *testing.T) {
 	body := append(pktLine("shallow "+oldOID+"\n"), pktLine(command)...)
 	body = append(body, []byte("0000PACKpayload")...)
 	called := false
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: authorityWithPolicy(t, Policy{Name: "developer", Version: 1, Git: GitPolicy{Tags: true}}),
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			called = true
@@ -131,7 +131,7 @@ func TestBrokerScopesLFSBatchOperations(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%s-%d", tt.operation, tt.wantStatus), func(t *testing.T) {
 			called := false
-			handler := NewHandler(HandlerOptions{
+			handler := newTestHandler(t, HandlerOptions{
 				Authority: authorityWithPolicy(t, Policy{Name: "developer", Version: 1, Git: tt.git}),
 				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 					called = true
@@ -141,6 +141,49 @@ func TestBrokerScopesLFSBatchOperations(t *testing.T) {
 			payload, err := json.Marshal(map[string]any{"operation": tt.operation, "objects": []any{map[string]any{"oid": strings.Repeat("a", 64), "size": 1}}})
 			require.NoError(t, err)
 			req := httptest.NewRequest(http.MethodPost, "/michaellee8/github-proxy.git/info/lfs/objects/batch", bytes.NewReader(payload))
+			req.Header.Set("Authorization", "Bearer pgh_pat_selector_secret")
+			res := httptest.NewRecorder()
+
+			handler.ServeHTTP(res, req)
+
+			require.Equal(t, tt.wantStatus, res.Code)
+			assert.Equal(t, tt.wantCall, called)
+		})
+	}
+}
+
+func TestBrokerRegistersExactLFSLockOperations(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		git        GitPolicy
+		wantStatus int
+		wantCall   bool
+	}{
+		{name: "list locks", method: http.MethodGet, path: "locks", wantStatus: http.StatusOK, wantCall: true},
+		{name: "create lock needs write authority", method: http.MethodPost, path: "locks", wantStatus: http.StatusForbidden},
+		{name: "create lock", method: http.MethodPost, path: "locks", git: GitPolicy{Push: GitPushNonDefault}, wantStatus: http.StatusOK, wantCall: true},
+		{name: "verify locks needs write authority", method: http.MethodPost, path: "locks/verify", wantStatus: http.StatusForbidden},
+		{name: "verify locks", method: http.MethodPost, path: "locks/verify", git: GitPolicy{Push: GitPushNonDefault}, wantStatus: http.StatusOK, wantCall: true},
+		{name: "unlock is always denied", method: http.MethodPost, path: "locks/42/unlock", git: GitPolicy{Push: GitPushAll}, wantStatus: http.StatusForbidden},
+		{name: "lock lookup is unregistered", method: http.MethodGet, path: "locks/42", wantStatus: http.StatusForbidden},
+		{name: "near match is unregistered", method: http.MethodGet, path: "locks-extra", wantStatus: http.StatusForbidden},
+		{name: "object download path is unregistered", method: http.MethodGet, path: "objects/abc", wantStatus: http.StatusForbidden},
+		{name: "object upload path is unregistered", method: http.MethodPut, path: "objects/abc", git: GitPolicy{Push: GitPushAll}, wantStatus: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			handler := newTestHandler(t, HandlerOptions{
+				Authority: authorityWithPolicy(t, Policy{Name: "developer", Version: 1, Git: tt.git}),
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					called = true
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+				}),
+			})
+			req := httptest.NewRequest(tt.method, "/michaellee8/github-proxy.git/info/lfs/"+tt.path, strings.NewReader(`{}`))
 			req.Header.Set("Authorization", "Bearer pgh_pat_selector_secret")
 			res := httptest.NewRecorder()
 

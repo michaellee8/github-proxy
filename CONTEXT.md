@@ -30,8 +30,14 @@ An opaque, revocable bearer credential that grants one Agent Host a defined Repo
 _Avoid_: GitHub PAT, upstream token
 
 **Target Repository**:
-The immutable GitHub repository identity and canonical name bound to a Repository Capability.
+The immutable GitHub repository identity bound to a Repository Capability. Its
+canonical owner/name and default branch are mutable Repository Observations.
 _Avoid_: Requested repository, current repo
+
+**Repository Observation**:
+Broker-verified mutable metadata for a Target Repository, including its canonical
+owner/name and default branch at a recorded validation time.
+_Avoid_: Repository identity, operator-supplied repository metadata
 
 **Repository Capability**:
 The association of one Capability Token with one Target Repository, one Upstream Credential, and one Policy Profile.
@@ -44,3 +50,14 @@ _Avoid_: Route list, GitHub scope
 **Compatibility Operation**:
 A recognized `pgh`, REST, GraphQL, Git, or LFS behavior that the Broker can authorize as one operation.
 _Avoid_: Arbitrary request, endpoint passthrough
+
+**Direct Containment**:
+The guarantee that the Broker exercises an Upstream Credential directly against
+only the Target Repository. Effects caused by repository-owned workflows,
+webhooks, or other automation are outside this guarantee.
+_Avoid_: Sandbox, effect containment, workflow isolation
+
+**Audit Event**:
+A redacted record of a Broker authorization decision and its upstream outcome,
+attributable to a Repository Capability without containing credential material.
+_Avoid_: Request log, token log, request-body archive

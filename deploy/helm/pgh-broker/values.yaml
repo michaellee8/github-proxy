@@ -3,7 +3,8 @@ replicaCount: 1
 image:
   repository: ghcr.io/example/pgh-broker
   pullPolicy: IfNotPresent
-  tag: ""
+  # Production installs must pin the exact published manifest.
+  digest: ""
 
 imagePullSecrets: []
 nameOverride: ""
@@ -13,6 +14,32 @@ service:
   type: ClusterIP
   port: 8080
 
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tlsSecretName: ""
+
+networkPolicy:
+  enabled: false
+  # Provide controller/network-specific peers. An empty ingress list denies all
+  # traffic to the Broker when the policy is enabled.
+  ingressFrom: []
+  # Defaults allow DNS, GitHub HTTPS, and PostgreSQL. Narrow these peers for the
+  # actual database and upstream network when your CNI supports it.
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 5432
+
 databaseURL:
   secretName: pgh-broker-database
   secretKey: url
@@ -21,6 +48,10 @@ encryptionKeyring:
   secretName: pgh-broker-encryption
   keysSecretKey: keys
   activeKeyIDSecretKey: active-key-id
+
+repositoryCacheTTL: 30s
+auditRetention: 2160h
+allowInsecureDatabase: false
 
 podAnnotations: {}
 podLabels: {}
@@ -40,7 +71,13 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
 
-resources: {}
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
 
 nodeSelector: {}
 tolerations: []

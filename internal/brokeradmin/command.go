@@ -2,6 +2,7 @@ package brokeradmin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,11 +17,12 @@ import (
 
 // PutCredentialRequest contains an Upstream Credential read by the offline admin CLI.
 type PutCredentialRequest struct {
-	Name         string
-	UpstreamHost string
-	APIBaseURL   string
-	APIVersion   string
-	Token        []byte
+	Name                 string
+	UpstreamHost         string
+	APIBaseURL           string
+	APIVersion           string
+	RepositoryResolution string
+	Token                []byte
 }
 
 // Service is the privileged administrative boundary. It is never exposed over HTTP.
@@ -28,21 +30,109 @@ type Service interface {
 	PutCredential(context.Context, PutCredentialRequest) error
 	Issue(context.Context, broker.IssueRequest) (broker.IssuedCapability, error)
 	Revoke(context.Context, string) error
+	ListAuditEvents(context.Context, broker.AuditQuery) ([]broker.AuditEvent, error)
+}
+
+// CommandOptions contains the offline service, streams, and clock used by the command tree.
+type CommandOptions struct {
+	Service Service
+	Stdin   io.Reader
+	Stdout  io.Writer
+	Stderr  io.Writer
+	Now     func() time.Time
 }
 
 // NewCommand constructs the offline pgh-broker administrative command tree.
-func NewCommand(service Service, stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
+func NewCommand(options CommandOptions) *cobra.Command {
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
 	root := &cobra.Command{
 		Use:           "pgh-broker",
 		Short:         "Administer repository-scoped GitHub capabilities",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.SetIn(stdin)
-	root.SetOut(stdout)
-	root.SetErr(stderr)
-	root.AddCommand(newCredentialCommand(service), newCapabilityCommand(service))
+	root.SetIn(options.Stdin)
+	root.SetOut(options.Stdout)
+	root.SetErr(options.Stderr)
+	root.AddCommand(newCredentialCommand(options.Service), newCapabilityCommand(options.Service, now), newAuditCommand(options.Service))
 	return root
+}
+
+func newAuditCommand(service Service) *cobra.Command {
+	audit := &cobra.Command{Use: "audit", Short: "Inspect redacted Broker request events"}
+	audit.AddCommand(newAuditListCommand(service, nil))
+	return audit
+}
+
+type auditListOptions struct {
+	service      Service
+	context      context.Context
+	stdout       io.Writer
+	capabilityID string
+	repositoryID int64
+	sinceValue   string
+	limit        int
+}
+
+func newAuditListCommand(service Service, runF func(*auditListOptions) error) *cobra.Command {
+	opts := &auditListOptions{service: service, limit: 100}
+	if runF == nil {
+		runF = auditListRun
+	}
+	command := &cobra.Command{
+		Use:   "list",
+		Short: "Print newest audit events as JSON lines",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			opts.context = cmd.Context()
+			opts.stdout = cmd.OutOrStdout()
+			return runF(opts)
+		},
+	}
+	command.Flags().StringVar(&opts.capabilityID, "capability", "", "filter by opaque capability ID")
+	command.Flags().Int64Var(&opts.repositoryID, "repository-id", 0, "filter by immutable repository ID")
+	command.Flags().StringVar(&opts.sinceValue, "since", "", "filter at or after an RFC3339 timestamp")
+	command.Flags().IntVar(&opts.limit, "limit", opts.limit, "maximum events to return (1-1000)")
+	return command
+}
+
+func auditListRun(opts *auditListOptions) error {
+	if opts.service == nil {
+		return errors.New("admin service is unavailable")
+	}
+	if opts.capabilityID != "" && !strings.HasPrefix(opts.capabilityID, "cap_") {
+		return cmdutil.FlagErrorf("capability must be an opaque cap_ ID")
+	}
+	if opts.repositoryID < 0 {
+		return cmdutil.FlagErrorf("repository-id must be positive")
+	}
+	if opts.limit <= 0 || opts.limit > 1000 {
+		return cmdutil.FlagErrorf("limit must be between 1 and 1000")
+	}
+	var since *time.Time
+	if opts.sinceValue != "" {
+		parsed, err := time.Parse(time.RFC3339, opts.sinceValue)
+		if err != nil {
+			return cmdutil.FlagErrorf("since must be an RFC3339 timestamp")
+		}
+		since = &parsed
+	}
+	events, err := opts.service.ListAuditEvents(opts.context, broker.AuditQuery{
+		CapabilityID: opts.capabilityID, RepositoryID: optionalPositiveInt64(opts.repositoryID), Since: since, Limit: opts.limit,
+	})
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(opts.stdout)
+	for _, event := range events {
+		if err := encoder.Encode(event); err != nil {
+			return fmt.Errorf("write audit event: %w", err)
+		}
+	}
+	return nil
 }
 
 func newCredentialCommand(service Service) *cobra.Command {
@@ -55,6 +145,9 @@ func newCredentialCommand(service Service) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if service == nil {
 				return errors.New("admin service is unavailable")
+			}
+			if request.RepositoryResolution != broker.RepositoryResolutionNumeric && request.RepositoryResolution != broker.RepositoryResolutionName {
+				return cmdutil.FlagErrorf("repository-resolution must be numeric-id or owner-name")
 			}
 			data, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 64*1024+1))
 			if err != nil {
@@ -78,16 +171,17 @@ func newCredentialCommand(service Service) *cobra.Command {
 	put.Flags().StringVar(&request.UpstreamHost, "host", "", "upstream GitHub host")
 	put.Flags().StringVar(&request.APIBaseURL, "api-base-url", "https://api.github.com", "upstream REST API base URL")
 	put.Flags().StringVar(&request.APIVersion, "api-version", "2022-11-28", "tested GitHub REST API version")
+	put.Flags().StringVar(&request.RepositoryResolution, "repository-resolution", broker.RepositoryResolutionNumeric, "repository resolution mode: numeric-id or owner-name")
 	_ = put.MarkFlagRequired("name")
 	_ = put.MarkFlagRequired("host")
 	credential.AddCommand(put)
 	return credential
 }
 
-func newCapabilityCommand(service Service) *cobra.Command {
+func newCapabilityCommand(service Service, now func() time.Time) *cobra.Command {
 	capability := &cobra.Command{Use: "capability", Short: "Issue and revoke repository capabilities"}
-	var credential, repo, defaultBranch, profile, expiresIn, gitPush string
-	var repositoryID int64
+	var credential, repo, profile, expiresIn, gitPush string
+	var expectedRepositoryID int64
 	var policyVersion int
 	var grants []string
 	var gitTags bool
@@ -103,6 +197,9 @@ func newCapabilityCommand(service Service) *cobra.Command {
 			if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 				return cmdutil.FlagErrorf("repo must be exactly OWNER/NAME")
 			}
+			if expectedRepositoryID < 0 {
+				return cmdutil.FlagErrorf("expected-repository-id must be positive")
+			}
 			policyGrants := make(map[string]bool, len(grants))
 			for _, grant := range grants {
 				if !broker.IsKnownGrant(grant) {
@@ -113,20 +210,26 @@ func newCapabilityCommand(service Service) *cobra.Command {
 			if gitPush != broker.GitPushNone && gitPush != broker.GitPushNonDefault && gitPush != broker.GitPushAll {
 				return cmdutil.FlagErrorf("git-push must be none, non-default, or all")
 			}
+			policy := broker.Policy{Name: profile, Version: policyVersion, Grants: policyGrants, Git: broker.GitPolicy{Push: gitPush, Tags: gitTags}}
+			if err := broker.ValidatePolicy(policy); err != nil {
+				return cmdutil.FlagErrorf("%s", err)
+			}
 			var expiresAt *time.Time
 			if expiresIn != "" {
 				duration, err := time.ParseDuration(expiresIn)
 				if err != nil || duration <= 0 {
 					return cmdutil.FlagErrorf("expires-in must be a positive duration")
 				}
-				value := time.Now().Add(duration)
+				value := now().Add(duration)
 				expiresAt = &value
 			}
 			issued, err := service.Issue(cmd.Context(), broker.IssueRequest{
 				CredentialName: credential,
-				Repository:     broker.Repository{ID: repositoryID, Owner: owner, Name: name, DefaultBranch: defaultBranch},
-				Policy:         broker.Policy{Name: profile, Version: policyVersion, Grants: policyGrants, Git: broker.GitPolicy{Push: gitPush, Tags: gitTags}},
-				ExpiresAt:      expiresAt,
+				Repository: broker.RepositoryRequest{
+					Owner: owner, Name: name, ExpectedID: optionalPositiveInt64(expectedRepositoryID),
+				},
+				Policy:    policy,
+				ExpiresAt: expiresAt,
 			})
 			if err != nil {
 				return err
@@ -137,15 +240,14 @@ func newCapabilityCommand(service Service) *cobra.Command {
 	}
 	issue.Flags().StringVar(&credential, "credential", "", "stored upstream credential name")
 	issue.Flags().StringVar(&repo, "repo", "", "target repository as OWNER/NAME")
-	issue.Flags().Int64Var(&repositoryID, "repository-id", 0, "immutable GitHub repository ID")
-	issue.Flags().StringVar(&defaultBranch, "default-branch", "", "target repository default branch")
+	issue.Flags().Int64Var(&expectedRepositoryID, "expected-repository-id", 0, "optional immutable GitHub repository ID assertion")
 	issue.Flags().StringVar(&profile, "policy", "developer", "policy profile name")
 	issue.Flags().IntVar(&policyVersion, "policy-version", 1, "policy profile version")
 	issue.Flags().StringSliceVar(&grants, "grant", nil, "additional policy grant")
 	issue.Flags().StringVar(&gitPush, "git-push", broker.GitPushNone, "Git branch push tier: none, non-default, or all")
 	issue.Flags().BoolVar(&gitTags, "git-tags", false, "allow Git tag creation and updates")
 	issue.Flags().StringVar(&expiresIn, "expires-in", "", "optional capability lifetime")
-	for _, required := range []string{"credential", "repo", "repository-id", "default-branch"} {
+	for _, required := range []string{"credential", "repo"} {
 		_ = issue.MarkFlagRequired(required)
 	}
 
@@ -158,11 +260,18 @@ func newCapabilityCommand(service Service) *cobra.Command {
 				return errors.New("admin service is unavailable")
 			}
 			if !strings.HasPrefix(args[0], "cap_") {
-				return fmt.Errorf("invalid capability ID %s", strconv.Quote(args[0]))
+				return cmdutil.FlagErrorf("invalid capability ID %s", strconv.Quote(args[0]))
 			}
 			return service.Revoke(cmd.Context(), args[0])
 		},
 	}
 	capability.AddCommand(issue, revoke)
 	return capability
+}
+
+func optionalPositiveInt64(value int64) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	return &value
 }

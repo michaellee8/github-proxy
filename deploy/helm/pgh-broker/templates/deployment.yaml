@@ -30,7 +30,11 @@ spec:
         - name: pgh-broker
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          {{- $digest := required "image.digest is required and must pin a sha256 manifest" .Values.image.digest }}
+          {{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $digest) }}
+          {{- fail "image.digest must be sha256 followed by 64 lowercase hexadecimal characters" }}
+          {{- end }}
+          image: "{{ required "image.repository is required" .Values.image.repository }}@{{ $digest }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - serve
@@ -52,6 +56,14 @@ spec:
                 secretKeyRef:
                   name: {{ required "encryptionKeyring.secretName is required" .Values.encryptionKeyring.secretName }}
                   key: {{ required "encryptionKeyring.activeKeyIDSecretKey is required" .Values.encryptionKeyring.activeKeyIDSecretKey }}
+            - name: PGH_REPOSITORY_CACHE_TTL
+              value: {{ .Values.repositoryCacheTTL | quote }}
+            - name: PGH_AUDIT_RETENTION
+              value: {{ .Values.auditRetention | quote }}
+            {{- if .Values.allowInsecureDatabase }}
+            - name: PGH_ALLOW_INSECURE_DATABASE
+              value: "true"
+            {{- end }}
           ports:
             - name: http
               containerPort: 8080

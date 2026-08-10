@@ -3,6 +3,8 @@ package broker
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,10 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type authorityFunc func(context.Context, string) (Session, error)
+type authorityFunc func(context.Context, string, RepositoryFreshness) (Session, error)
 
-func (f authorityFunc) Resolve(ctx context.Context, token string) (Session, error) {
-	return f(ctx, token)
+func (f authorityFunc) Resolve(ctx context.Context, token string, freshness RepositoryFreshness) (Session, error) {
+	return f(ctx, token, freshness)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -26,7 +28,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestBrokerContextReturnsBoundCapability(t *testing.T) {
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			t.Fatal("context request must not call GitHub")
@@ -51,7 +53,7 @@ func TestBrokerContextReturnsBoundCapability(t *testing.T) {
 }
 
 func TestBrokerRejectsMissingCapability(t *testing.T) {
-	handler := NewHandler(HandlerOptions{Authority: testAuthority(t)})
+	handler := newTestHandler(t, HandlerOptions{Authority: testAuthority(t)})
 	req := httptest.NewRequest(http.MethodGet, "/_pgh/v1/context", nil)
 	res := httptest.NewRecorder()
 
@@ -62,7 +64,7 @@ func TestBrokerRejectsMissingCapability(t *testing.T) {
 }
 
 func TestBrokerAcceptsGitHubCLITokenScheme(t *testing.T) {
-	handler := NewHandler(HandlerOptions{Authority: testAuthority(t)})
+	handler := newTestHandler(t, HandlerOptions{Authority: testAuthority(t)})
 	req := httptest.NewRequest(http.MethodGet, "/_pgh/v1/context", nil)
 	req.Header.Set("Authorization", "token pgh_pat_selector_secret")
 	res := httptest.NewRecorder()
@@ -73,7 +75,7 @@ func TestBrokerAcceptsGitHubCLITokenScheme(t *testing.T) {
 }
 
 func TestBrokerHealthDoesNotRequireCapability(t *testing.T) {
-	handler := NewHandler(HandlerOptions{Authority: testAuthority(t)})
+	handler := newTestHandler(t, HandlerOptions{Authority: testAuthority(t)})
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	res := httptest.NewRecorder()
 
@@ -83,9 +85,115 @@ func TestBrokerHealthDoesNotRequireCapability(t *testing.T) {
 	assert.JSONEq(t, `{"status":"ok"}`, res.Body.String())
 }
 
+func TestBrokerAppliesLimitsToResolvedCapabilityID(t *testing.T) {
+	limiter, err := NewLocalRequestLimiter(LocalLimitOptions{ReadsPerMinute: 1, MutationsPerMinute: 1, Concurrent: 1})
+	require.NoError(t, err)
+	handler := newTestHandler(t, HandlerOptions{
+		Authority: authorityFunc(func(_ context.Context, _ string, _ RepositoryFreshness) (Session, error) {
+			return Session{
+				CapabilityID: "cap-authenticated",
+				Repository:   Repository{ID: 99, Owner: "owner", Name: "repo", DefaultBranch: "main"},
+				Upstream:     UpstreamAccess{Host: "github.com"},
+				Policy:       Policy{Name: "developer", Version: 1},
+			}, nil
+		}),
+		Limiter: limiter,
+	})
+
+	for index, token := range []string{"first-token", "second-token"} {
+		req := httptest.NewRequest(http.MethodGet, "/_pgh/v1/context", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+
+		handler.ServeHTTP(res, req)
+
+		if index == 0 {
+			require.Equal(t, http.StatusOK, res.Code)
+		} else {
+			require.Equal(t, http.StatusTooManyRequests, res.Code)
+		}
+	}
+	local := limiter.(*localRequestLimiter)
+	assert.Len(t, local.limits, 1)
+	assert.Contains(t, local.limits, "cap-authenticated")
+}
+
+func TestBrokerUsesOneBoundedLimiterEntryForInvalidTokens(t *testing.T) {
+	limiter, err := NewLocalRequestLimiter(LocalLimitOptions{ReadsPerMinute: 100, MutationsPerMinute: 100, Concurrent: 1})
+	require.NoError(t, err)
+	handler := newTestHandler(t, HandlerOptions{
+		Authority: authorityFunc(func(context.Context, string, RepositoryFreshness) (Session, error) {
+			return Session{}, ErrCapabilityInvalid
+		}),
+		Limiter: limiter,
+	})
+
+	for index := range 20 {
+		req := httptest.NewRequest(http.MethodGet, "/_pgh/v1/context", nil)
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer pgh_pat_selector-%d.secret", index))
+		res := httptest.NewRecorder()
+
+		handler.ServeHTTP(res, req)
+
+		require.Equal(t, http.StatusUnauthorized, res.Code)
+	}
+	local := limiter.(*localRequestLimiter)
+	assert.Len(t, local.limits, 1)
+	assert.Contains(t, local.limits, "invalid")
+}
+
+func TestBrokerClassifiesLFSReadAndMutationSemantics(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+		want RequestClass
+	}{
+		{name: "batch download", path: "/owner/repo.git/info/lfs/objects/batch", body: `{"operation":"download"}`, want: RequestRead},
+		{name: "batch upload", path: "/owner/repo.git/info/lfs/objects/batch", body: `{"operation":"upload"}`, want: RequestMutation},
+		{name: "malformed batch", path: "/owner/repo.git/info/lfs/objects/batch", body: `{`, want: RequestMutation},
+		{name: "lock verification", path: "/owner/repo.git/info/lfs/locks/verify", body: `{}`, want: RequestRead},
+		{name: "lock creation", path: "/owner/repo.git/info/lfs/locks", body: `{}`, want: RequestMutation},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+
+			got := classifyRequest(req)
+
+			assert.Equal(t, tt.want, got)
+			data, err := io.ReadAll(req.Body)
+			require.NoError(t, err)
+			assert.Equal(t, tt.body, string(data))
+		})
+	}
+}
+
+func TestBrokerDeniesMutationWhenDurableAuditIsUnavailable(t *testing.T) {
+	called := false
+	handler := newTestHandler(t, HandlerOptions{
+		Authority: authorityWithPolicy(t, Policy{Name: "developer", Version: 1}),
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			called = true
+			return nil, errors.New("must not be called")
+		}),
+		Auditor: NewRequestAuditor(&memoryAuditStore{err: errors.New("database unavailable")}, &memoryAuditEmitter{}),
+		Limiter: newTestRequestLimiter(t),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v3/repos/michaellee8/github-proxy/issues", strings.NewReader(`{"title":"blocked"}`))
+	req.Header.Set("Authorization", "Bearer pgh_pat_selector_secret")
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, res.Code)
+	assert.Contains(t, res.Body.String(), "PGH_AUDIT_UNAVAILABLE")
+	assert.False(t, called)
+}
+
 func TestBrokerScopesRESTAndReplacesAuthorization(t *testing.T) {
 	var upstreamRequest *http.Request
-	handler := NewHandler(HandlerOptions{
+	handler := newTestHandler(t, HandlerOptions{
 		Authority: testAuthority(t),
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			upstreamRequest = req.Clone(req.Context())
@@ -136,6 +244,10 @@ func TestBrokerAppliesRegisteredRESTPolicy(t *testing.T) {
 	}{
 		{name: "repository readme", method: http.MethodGet, path: "/api/v3/repos/michaellee8/github-proxy/readme", wantStatus: http.StatusCreated, wantCall: true},
 		{name: "developer creates issue", method: http.MethodPost, path: "/api/v3/repos/michaellee8/github-proxy/issues", body: `{"title":"scoped"}`, wantStatus: http.StatusCreated, wantCall: true},
+		{name: "pull merge needs grant", method: http.MethodPut, path: "/api/v3/repos/michaellee8/github-proxy/pulls/12/merge", body: `{}`, wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
+		{name: "pull merge granted", method: http.MethodPut, path: "/api/v3/repos/michaellee8/github-proxy/pulls/12/merge", body: `{}`, grants: []string{"pulls.merge"}, wantStatus: http.StatusCreated, wantCall: true},
+		{name: "review dismissal needs grant", method: http.MethodPut, path: "/api/v3/repos/michaellee8/github-proxy/pulls/12/reviews/34/dismissals", body: `{"message":"superseded"}`, wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
+		{name: "review dismissal granted", method: http.MethodPut, path: "/api/v3/repos/michaellee8/github-proxy/pulls/12/reviews/34/dismissals", body: `{"message":"superseded"}`, grants: []string{"pulls.review.dismiss"}, wantStatus: http.StatusCreated, wantCall: true},
 		{name: "developer reads actions", method: http.MethodGet, path: "/api/v3/repos/michaellee8/github-proxy/actions/runs", wantStatus: http.StatusCreated, wantCall: true},
 		{name: "workflow dispatch needs grant", method: http.MethodPost, path: "/api/v3/repos/michaellee8/github-proxy/actions/workflows/test.yml/dispatches", wantStatus: http.StatusForbidden, wantCode: "PGH_POLICY_DENIED"},
 		{name: "workflow dispatch granted", method: http.MethodPost, path: "/api/v3/repos/michaellee8/github-proxy/actions/workflows/test.yml/dispatches", body: `{"ref":"main"}`, grants: []string{"actions.write"}, git: GitPolicy{Push: GitPushAll}, wantStatus: http.StatusCreated, wantCall: true},
@@ -158,7 +270,7 @@ func TestBrokerAppliesRegisteredRESTPolicy(t *testing.T) {
 			for _, grant := range tt.grants {
 				policy.Grants[grant] = true
 			}
-			handler := NewHandler(HandlerOptions{
+			handler := newTestHandler(t, HandlerOptions{
 				Authority: authorityWithPolicy(t, policy),
 				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 					called = true
@@ -261,6 +373,11 @@ func TestBrokerValidatesRESTRefFieldsAgainstGitPolicy(t *testing.T) {
 			policy: Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushAll}}, wantStatus: http.StatusForbidden,
 		},
 		{
+			name: "pull request head repository cannot name an outside repository", method: http.MethodPost,
+			path: "/api/v3/repos/michaellee8/github-proxy/pulls", body: `{"title":"outside","head":"branch","head_repo":"outside","base":"main"}`,
+			policy: Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushAll}}, wantStatus: http.StatusForbidden,
+		},
+		{
 			name: "pull request head can name a branch in the bound repository", method: http.MethodPost,
 			path: "/api/v3/repos/michaellee8/github-proxy/pulls", body: `{"title":"inside","head":"agent-work","base":"main"}`,
 			policy: Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}}, wantStatus: http.StatusCreated,
@@ -270,7 +387,7 @@ func TestBrokerValidatesRESTRefFieldsAgainstGitPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			called := false
-			handler := NewHandler(HandlerOptions{
+			handler := newTestHandler(t, HandlerOptions{
 				Authority: authorityWithPolicy(t, tt.policy),
 				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 					called = true
@@ -296,21 +413,33 @@ func testAuthority(t *testing.T) Authority {
 
 func authorityWithPolicy(t *testing.T, policy Policy) Authority {
 	t.Helper()
-	return authorityFunc(func(_ context.Context, token string) (Session, error) {
+	return authorityFunc(func(_ context.Context, token string, _ RepositoryFreshness) (Session, error) {
 		require.Equal(t, "pgh_pat_selector_secret", token)
 		return Session{
 			CapabilityID: "cap-1",
 			Repository: Repository{
-				ID:            1326468465,
-				Owner:         "michaellee8",
-				Name:          "github-proxy",
-				UpstreamHost:  "github.com",
-				APIBaseURL:    "https://api.github.com",
-				APIVersion:    "2022-11-28",
-				UpstreamToken: "upstream-secret",
-				DefaultBranch: "main",
+				ID: 1326468465, Owner: "michaellee8", Name: "github-proxy", DefaultBranch: "main",
 			},
-			Policy: policy,
+			Upstream: UpstreamAccess{Host: "github.com", APIBaseURL: "https://api.github.com", APIVersion: "2022-11-28", Token: "upstream-secret"},
+			Policy:   policy,
 		}, nil
 	})
+}
+
+func newTestHandler(t *testing.T, options HandlerOptions) http.Handler {
+	t.Helper()
+	if options.Auditor == nil {
+		options.Auditor = NewRequestAuditor(&memoryAuditStore{}, &memoryAuditEmitter{})
+	}
+	if options.Limiter == nil {
+		options.Limiter = newTestRequestLimiter(t)
+	}
+	return NewHandler(options)
+}
+
+func newTestRequestLimiter(t *testing.T) RequestLimiter {
+	t.Helper()
+	limiter, err := NewLocalRequestLimiter(LocalLimitOptions{ReadsPerMinute: 10_000, MutationsPerMinute: 10_000, Concurrent: 100})
+	require.NoError(t, err)
+	return limiter
 }
