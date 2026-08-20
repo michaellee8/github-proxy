@@ -75,7 +75,7 @@ func TestJSONAuditEmitterWritesOnlyRedactedEventFields(t *testing.T) {
 	emitter := NewJSONAuditEmitter(output)
 	event := AuditEvent{
 		OccurredAt: time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC),
-		RequestID:  "request-1", Phase: AuditPhasePreflight, CapabilityID: "cap-1",
+		RequestID:  "request-1", Phase: AuditPhasePreflight, CapabilityID: "cap-1", PolicyRevision: 3,
 		RepositoryID: 99, Method: "POST", Path: "/api/v3/repos/owner/repo/issues", Mutation: true,
 	}
 
@@ -83,7 +83,7 @@ func TestJSONAuditEmitterWritesOnlyRedactedEventFields(t *testing.T) {
 
 	assert.JSONEq(t, `{
 		"time":"2026-08-10T12:00:00Z","event":"broker_request","request_id":"request-1",
-		"phase":"preflight","capability_id":"cap-1","repository_id":99,
+		"phase":"preflight","capability_id":"cap-1","policy_revision":3,"repository_id":99,
 		"method":"POST","path":"/api/v3/repos/owner/repo/issues","mutation":true
 	}`, output.String())
 	assert.NotContains(t, output.String(), "Authorization")

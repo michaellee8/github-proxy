@@ -78,6 +78,48 @@ git clone https://pgh:${PGH_TOKEN}@broker.example.internal/OWNER/REPO.git
 Avoid embedding the token in a persistent remote URL. Configure a credential
 helper or inject the credential for each agent job.
 
+## Inspect and replace a capability policy
+
+Policy inspection and replacement are offline administrative operations that
+connect directly to PostgreSQL. They are not exposed by the Broker HTTP API.
+Inspect the current complete policy and Policy Revision as JSON:
+
+```bash
+docker compose exec pgh-broker pgh-broker capability policy show cap_SELECTOR
+```
+
+Replace all mutable controls while retaining the same Capability Token:
+
+```bash
+docker compose exec pgh-broker pgh-broker capability policy replace cap_SELECTOR \
+  --git-push non-default \
+  --git-tags=false \
+  --grant pulls.merge \
+  --reason "allow merges for the release"
+```
+
+Use repeated `--grant` flags for multiple additional grants, or use
+`--no-grants` to select none. The Git push tier, tag authority, and either the
+complete grant set or `--no-grants` must be explicit. `--actor` may record an
+unverified operator label. The command emits one JSON object containing whether
+the policy changed, lifecycle state, repository identity, complete policy, and
+Policy Revision.
+
+Replacement accepts active capabilities only. It may broaden or narrow policy,
+and an identical replacement is a no-op. Requests resolved after the database
+transaction commits use the new revision; a request that already resolved may
+finish under its recorded earlier revision.
+
+Inspect the permanent, newest-first Administrative Event history as JSON Lines:
+
+```bash
+docker compose exec pgh-broker pgh-broker capability policy history cap_SELECTOR \
+  --since 2026-08-01T00:00:00Z \
+  --limit 100
+```
+
+Policy show and history remain available after expiration or revocation.
+
 ## Revoke a capability
 
 For a token shaped as `pgh_pat_SELECTOR.SECRET`, its administrative ID is

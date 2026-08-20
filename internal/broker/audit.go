@@ -20,17 +20,18 @@ const (
 
 // AuditEvent is the redacted request record shared by durable storage and JSON logs.
 type AuditEvent struct {
-	OccurredAt   time.Time `json:"time"`
-	Event        string    `json:"event"`
-	RequestID    string    `json:"request_id"`
-	Phase        string    `json:"phase"`
-	CapabilityID string    `json:"capability_id"`
-	RepositoryID int64     `json:"repository_id"`
-	Method       string    `json:"method"`
-	Path         string    `json:"path"`
-	Mutation     bool      `json:"mutation"`
-	Status       int       `json:"status,omitempty"`
-	DurationMS   int64     `json:"duration_ms,omitempty"`
+	OccurredAt     time.Time `json:"time"`
+	Event          string    `json:"event"`
+	RequestID      string    `json:"request_id"`
+	Phase          string    `json:"phase"`
+	CapabilityID   string    `json:"capability_id"`
+	PolicyRevision int64     `json:"policy_revision"`
+	RepositoryID   int64     `json:"repository_id"`
+	Method         string    `json:"method"`
+	Path           string    `json:"path"`
+	Mutation       bool      `json:"mutation"`
+	Status         int       `json:"status,omitempty"`
+	DurationMS     int64     `json:"duration_ms,omitempty"`
 }
 
 // AuditStore is the durable audit persistence boundary.

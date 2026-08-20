@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -118,7 +119,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	started := h.now()
 	event := AuditEvent{
 		OccurredAt: started, RequestID: newAuditRequestID(), CapabilityID: session.CapabilityID,
-		RepositoryID: session.Repository.ID, Method: req.Method, Path: req.URL.Path, Mutation: class == RequestMutation,
+		PolicyRevision: session.PolicyRevision, RepositoryID: session.Repository.ID,
+		Method: req.Method, Path: req.URL.Path, Mutation: class == RequestMutation,
 	}
 	if err := h.auditor.Preflight(req.Context(), event); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Message: "request audit is unavailable", Code: "PGH_AUDIT_UNAVAILABLE"})
@@ -245,9 +247,17 @@ func (h *handler) serveContext(w http.ResponseWriter, session Session) {
 		Name  string `json:"name"`
 	}
 	type policyResponse struct {
-		Name    string `json:"name"`
-		Version int    `json:"version"`
+		Name     string    `json:"name"`
+		Version  int       `json:"version"`
+		Revision int64     `json:"revision"`
+		Grants   []string  `json:"grants"`
+		Git      GitPolicy `json:"git"`
 	}
+	grants := make([]string, 0, len(session.Policy.Grants))
+	for grant := range session.Policy.Grants {
+		grants = append(grants, grant)
+	}
+	sort.Strings(grants)
 	writeJSON(w, http.StatusOK, struct {
 		CapabilityID    string             `json:"capability_id"`
 		UpstreamHost    string             `json:"upstream_host"`
@@ -256,10 +266,13 @@ func (h *handler) serveContext(w http.ResponseWriter, session Session) {
 		ExpiresAt       any                `json:"expires_at"`
 		ProtocolVersion string             `json:"protocol_version"`
 	}{
-		CapabilityID:    session.CapabilityID,
-		UpstreamHost:    session.Upstream.Host,
-		Repository:      repositoryResponse{ID: session.Repository.ID, Owner: session.Repository.Owner, Name: session.Repository.Name},
-		Policy:          policyResponse{Name: session.Policy.Name, Version: session.Policy.Version},
+		CapabilityID: session.CapabilityID,
+		UpstreamHost: session.Upstream.Host,
+		Repository:   repositoryResponse{ID: session.Repository.ID, Owner: session.Repository.Owner, Name: session.Repository.Name},
+		Policy: policyResponse{
+			Name: session.Policy.Name, Version: session.Policy.Version, Revision: session.PolicyRevision,
+			Grants: grants, Git: session.Policy.Git,
+		},
 		ExpiresAt:       session.ExpiresAt,
 		ProtocolVersion: protocolVersion,
 	})

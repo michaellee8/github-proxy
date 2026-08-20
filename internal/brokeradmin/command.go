@@ -30,6 +30,9 @@ type Service interface {
 	PutCredential(context.Context, PutCredentialRequest) error
 	Issue(context.Context, broker.IssueRequest) (broker.IssuedCapability, error)
 	Revoke(context.Context, string) error
+	ShowPolicy(context.Context, string) (broker.CapabilityPolicyView, error)
+	ReplacePolicy(context.Context, ReplacePolicyRequest) (broker.CapabilityPolicyReplacementResult, error)
+	ListPolicyHistory(context.Context, broker.CapabilityPolicyHistoryQuery) ([]broker.CapabilityPolicyEvent, error)
 	ListAuditEvents(context.Context, broker.AuditQuery) ([]broker.AuditEvent, error)
 }
 
@@ -179,7 +182,7 @@ func newCredentialCommand(service Service) *cobra.Command {
 }
 
 func newCapabilityCommand(service Service, now func() time.Time) *cobra.Command {
-	capability := &cobra.Command{Use: "capability", Short: "Issue and revoke repository capabilities"}
+	capability := &cobra.Command{Use: "capability", Short: "Manage repository capabilities"}
 	var credential, repo, profile, expiresIn, gitPush string
 	var expectedRepositoryID int64
 	var policyVersion int
@@ -265,8 +268,185 @@ func newCapabilityCommand(service Service, now func() time.Time) *cobra.Command 
 			return service.Revoke(cmd.Context(), args[0])
 		},
 	}
-	capability.AddCommand(issue, revoke)
+	capability.AddCommand(issue, revoke, newCapabilityPolicyCommand(service))
 	return capability
+}
+
+func newCapabilityPolicyCommand(service Service) *cobra.Command {
+	policy := &cobra.Command{Use: "policy", Short: "Inspect and replace capability policies"}
+	policy.AddCommand(newPolicyShowCommand(service), newPolicyReplaceCommand(service), newPolicyHistoryCommand(service))
+	return policy
+}
+
+func newPolicyShowCommand(service Service) *cobra.Command {
+	return &cobra.Command{
+		Use:   "show CAPABILITY_ID",
+		Short: "Print the current capability policy as JSON",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if service == nil {
+				return errors.New("admin service is unavailable")
+			}
+			if err := validateCapabilityID(args[0]); err != nil {
+				return err
+			}
+			view, err := service.ShowPolicy(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(view)
+		},
+	}
+}
+
+type policyReplaceOptions struct {
+	service      Service
+	context      context.Context
+	stdout       io.Writer
+	capabilityID string
+	grants       []string
+	noGrants     bool
+	gitPush      string
+	gitTags      bool
+	gitTagsSet   bool
+	reason       string
+	actor        string
+}
+
+func newPolicyReplaceCommand(service Service) *cobra.Command {
+	opts := &policyReplaceOptions{service: service}
+	command := &cobra.Command{
+		Use:   "replace CAPABILITY_ID",
+		Short: "Atomically replace an active capability's customizable policy",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.context = cmd.Context()
+			opts.stdout = cmd.OutOrStdout()
+			opts.capabilityID = args[0]
+			opts.gitTagsSet = cmd.Flags().Changed("git-tags")
+			return policyReplaceRun(opts)
+		},
+	}
+	command.Flags().StringSliceVar(&opts.grants, "grant", nil, "complete additional policy grant set")
+	command.Flags().BoolVar(&opts.noGrants, "no-grants", false, "replace with no additional policy grants")
+	command.Flags().StringVar(&opts.gitPush, "git-push", "", "Git branch push tier: none, non-default, or all")
+	command.Flags().BoolVar(&opts.gitTags, "git-tags", false, "whether Git tag creation and updates are allowed")
+	command.Flags().StringVar(&opts.reason, "reason", "", "required reason recorded in permanent policy history")
+	command.Flags().StringVar(&opts.actor, "actor", "", "optional unverified operator label")
+	return command
+}
+
+func policyReplaceRun(opts *policyReplaceOptions) error {
+	if opts.service == nil {
+		return errors.New("admin service is unavailable")
+	}
+	if err := validateCapabilityID(opts.capabilityID); err != nil {
+		return err
+	}
+	if opts.gitPush != broker.GitPushNone && opts.gitPush != broker.GitPushNonDefault && opts.gitPush != broker.GitPushAll {
+		return cmdutil.FlagErrorf("git-push must be explicitly set to none, non-default, or all")
+	}
+	if !opts.gitTagsSet {
+		return cmdutil.FlagErrorf("git-tags must be explicitly set to true or false")
+	}
+	if len(opts.grants) == 0 && !opts.noGrants {
+		return cmdutil.FlagErrorf("either grant or no-grants must be specified")
+	}
+	if len(opts.grants) > 0 && opts.noGrants {
+		return cmdutil.FlagErrorf("grant and no-grants are mutually exclusive")
+	}
+	grants := make(map[string]bool, len(opts.grants))
+	for _, grant := range opts.grants {
+		if !broker.IsKnownGrant(grant) {
+			return cmdutil.FlagErrorf("unknown policy grant %q", grant)
+		}
+		if grants[grant] {
+			return cmdutil.FlagErrorf("duplicate policy grant %q", grant)
+		}
+		grants[grant] = true
+	}
+	if strings.TrimSpace(opts.reason) == "" {
+		return cmdutil.FlagErrorf("reason is required")
+	}
+	result, err := opts.service.ReplacePolicy(opts.context, ReplacePolicyRequest{
+		CapabilityID: opts.capabilityID,
+		Policy: broker.Policy{
+			Name: "developer", Version: 1, Grants: grants,
+			Git: broker.GitPolicy{Push: opts.gitPush, Tags: opts.gitTags},
+		},
+		Reason: opts.reason, Actor: opts.actor,
+	})
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(opts.stdout).Encode(result)
+}
+
+type policyHistoryOptions struct {
+	service      Service
+	context      context.Context
+	stdout       io.Writer
+	capabilityID string
+	sinceValue   string
+	limit        int
+}
+
+func newPolicyHistoryCommand(service Service) *cobra.Command {
+	opts := &policyHistoryOptions{service: service, limit: 100}
+	command := &cobra.Command{
+		Use:   "history CAPABILITY_ID",
+		Short: "Print permanent capability policy history as JSON lines",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.context = cmd.Context()
+			opts.stdout = cmd.OutOrStdout()
+			opts.capabilityID = args[0]
+			return policyHistoryRun(opts)
+		},
+	}
+	command.Flags().StringVar(&opts.sinceValue, "since", "", "filter at or after an RFC3339 timestamp")
+	command.Flags().IntVar(&opts.limit, "limit", opts.limit, "maximum events to return (1-1000)")
+	return command
+}
+
+func policyHistoryRun(opts *policyHistoryOptions) error {
+	if opts.service == nil {
+		return errors.New("admin service is unavailable")
+	}
+	if err := validateCapabilityID(opts.capabilityID); err != nil {
+		return err
+	}
+	if opts.limit <= 0 || opts.limit > 1000 {
+		return cmdutil.FlagErrorf("limit must be between 1 and 1000")
+	}
+	var since *time.Time
+	if opts.sinceValue != "" {
+		parsed, err := time.Parse(time.RFC3339, opts.sinceValue)
+		if err != nil {
+			return cmdutil.FlagErrorf("since must be an RFC3339 timestamp")
+		}
+		since = &parsed
+	}
+	events, err := opts.service.ListPolicyHistory(opts.context, broker.CapabilityPolicyHistoryQuery{
+		CapabilityID: opts.capabilityID, Since: since, Limit: opts.limit,
+	})
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(opts.stdout)
+	for _, event := range events {
+		if err := encoder.Encode(event); err != nil {
+			return fmt.Errorf("write capability policy event: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateCapabilityID(id string) error {
+	if !strings.HasPrefix(id, "cap_") || len(id) == len("cap_") {
+		return cmdutil.FlagErrorf("invalid capability ID %s", strconv.Quote(id))
+	}
+	return nil
 }
 
 func optionalPositiveInt64(value int64) *int64 {

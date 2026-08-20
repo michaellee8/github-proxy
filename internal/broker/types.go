@@ -23,11 +23,12 @@ const (
 
 // Session is the trusted request context returned by an Authority.
 type Session struct {
-	CapabilityID string
-	Repository   Repository
-	Upstream     UpstreamAccess
-	Policy       Policy
-	ExpiresAt    *time.Time
+	CapabilityID   string
+	PolicyRevision int64
+	Repository     Repository
+	Upstream       UpstreamAccess
+	Policy         Policy
+	ExpiresAt      *time.Time
 }
 
 // Repository identifies the only upstream repository available to a Session.
@@ -67,10 +68,10 @@ type UpstreamAccess struct {
 
 // Policy identifies the resolved authorization profile for a Session.
 type Policy struct {
-	Name    string
-	Version int
-	Grants  map[string]bool
-	Git     GitPolicy
+	Name    string          `json:"name"`
+	Version int             `json:"version"`
+	Grants  map[string]bool `json:"grants"`
+	Git     GitPolicy       `json:"git"`
 }
 
 const (
@@ -84,6 +85,6 @@ const (
 
 // GitPolicy grants ref-level authority for Git smart HTTP.
 type GitPolicy struct {
-	Push string
-	Tags bool
+	Push string `json:"push"`
+	Tags bool   `json:"tags"`
 }

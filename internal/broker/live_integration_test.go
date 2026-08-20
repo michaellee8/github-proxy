@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,7 +27,19 @@ type liveAuthority struct {
 	session broker.Session
 }
 
+type liveAuthorityFunc func(context.Context, string, broker.RepositoryFreshness) (broker.Session, error)
+
+func (f liveAuthorityFunc) Resolve(ctx context.Context, token string, freshness broker.RepositoryFreshness) (broker.Session, error) {
+	return f(ctx, token, freshness)
+}
+
 type liveAuditStore struct{}
+
+type liveRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f liveRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func (liveAuditStore) RecordAuditEvent(context.Context, broker.AuditEvent) error { return nil }
 
@@ -79,6 +92,71 @@ func TestLiveGitHubReadCompatibility(t *testing.T) {
 		require.Equal(t, http.StatusOK, res.Code, res.Body.String())
 		assert.Contains(t, res.Body.String(), `"nameWithOwner":"`+owner+`/`+name+`"`)
 	})
+}
+
+func TestLiveCapabilityPolicyReplacementUsesSameToken(t *testing.T) {
+	requireLiveWriteOptIn(t)
+	token := os.Getenv("GH_TOKEN")
+	if token == "" {
+		token = os.Getenv("PGH_LIVE_TOKEN")
+	}
+	if token == "" {
+		t.Skip("GH_TOKEN or PGH_LIVE_TOKEN is not set")
+	}
+	const repositoryName = "michaellee8/github-proxy-test-repo"
+	const owner = "michaellee8"
+	const name = "github-proxy-test-repo"
+
+	var mu sync.RWMutex
+	policy := broker.Policy{Name: "developer", Version: 1, Git: broker.GitPolicy{Push: broker.GitPushNone}}
+	revision := int64(1)
+	authority := liveAuthorityFunc(func(_ context.Context, capability string, _ broker.RepositoryFreshness) (broker.Session, error) {
+		if capability != "live-capability" {
+			return broker.Session{}, errors.New("unexpected capability token")
+		}
+		mu.RLock()
+		defer mu.RUnlock()
+		return broker.Session{
+			CapabilityID: "live-policy-replacement", PolicyRevision: revision,
+			Repository: broker.Repository{Owner: owner, Name: name, DefaultBranch: "main"},
+			Upstream: broker.UpstreamAccess{
+				Host: "github.com", APIBaseURL: "https://api.github.com", APIVersion: "2022-11-28", Token: token,
+			},
+			Policy: policy,
+		}, nil
+	})
+	upstreamCalls := 0
+	transport := liveRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return http.DefaultTransport.RoundTrip(request)
+	})
+	handler := newLiveBrokerHandler(t, broker.HandlerOptions{Authority: authority, Transport: transport})
+	requestPath := "/api/v3/repos/" + repositoryName + "/actions/runs/0/rerun"
+
+	denied := brokerRequest(t, handler, http.MethodPost, requestPath, "")
+	require.Equal(t, http.StatusForbidden, denied.Code, denied.Body.String())
+	require.Contains(t, denied.Body.String(), "PGH_POLICY_DENIED")
+	require.Equal(t, 0, upstreamCalls)
+
+	mu.Lock()
+	policy = broker.Policy{
+		Name: "developer", Version: 1, Grants: map[string]bool{"actions.write": true},
+		Git: broker.GitPolicy{Push: broker.GitPushNone},
+	}
+	revision = 2
+	mu.Unlock()
+	forwarded := brokerRequest(t, handler, http.MethodPost, requestPath, "")
+	require.Equal(t, http.StatusNotFound, forwarded.Code, forwarded.Body.String())
+	require.Equal(t, 1, upstreamCalls)
+
+	mu.Lock()
+	policy = broker.Policy{Name: "developer", Version: 1, Git: broker.GitPolicy{Push: broker.GitPushNone}}
+	revision = 3
+	mu.Unlock()
+	deniedAgain := brokerRequest(t, handler, http.MethodPost, requestPath, "")
+	require.Equal(t, http.StatusForbidden, deniedAgain.Code, deniedAgain.Body.String())
+	require.Contains(t, deniedAgain.Body.String(), "PGH_POLICY_DENIED")
+	require.Equal(t, 1, upstreamCalls)
 }
 
 func TestLiveGitSmartHTTPReadCompatibility(t *testing.T) {
@@ -482,13 +560,17 @@ func requireLiveGitHubRef(t *testing.T, token, repositoryName, ref string) {
 }
 
 func brokerRequest(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	return brokerRequestWithCapability(t, handler, "live-capability", method, path, body)
+}
+
+func brokerRequestWithCapability(t *testing.T, handler http.Handler, capability, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
 	}
 	req := httptest.NewRequest(method, path, reader)
-	req.Header.Set("Authorization", "Bearer live-capability")
+	req.Header.Set("Authorization", "Bearer "+capability)
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}

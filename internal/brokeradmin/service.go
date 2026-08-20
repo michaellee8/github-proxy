@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cli/cli/v2/internal/broker"
 )
@@ -19,6 +20,17 @@ type Store interface {
 	broker.AuditArchive
 	PutCredential(context.Context, broker.StoredCredential) error
 	RevokeCapability(context.Context, string, time.Time) error
+	CapabilityPolicyByID(context.Context, string, time.Time) (broker.CapabilityPolicyView, error)
+	ReplaceCapabilityPolicy(context.Context, broker.CapabilityPolicyReplacement) (broker.CapabilityPolicyReplacementResult, error)
+	ListCapabilityPolicyEvents(context.Context, broker.CapabilityPolicyHistoryQuery) ([]broker.CapabilityPolicyEvent, error)
+}
+
+// ReplacePolicyRequest contains one complete offline Policy Profile replacement.
+type ReplacePolicyRequest struct {
+	CapabilityID string
+	Policy       broker.Policy
+	Reason       string
+	Actor        string
 }
 
 // AdminService encrypts credentials and manages Repository Capabilities.
@@ -90,6 +102,47 @@ func (s *AdminService) Revoke(ctx context.Context, id string) error {
 	return s.store.RevokeCapability(ctx, id, s.now())
 }
 
+// ShowPolicy returns current policy and lifecycle state for one capability.
+func (s *AdminService) ShowPolicy(ctx context.Context, id string) (broker.CapabilityPolicyView, error) {
+	if s.store == nil || s.now == nil {
+		return broker.CapabilityPolicyView{}, errors.New("admin service is unavailable")
+	}
+	return s.store.CapabilityPolicyByID(ctx, id, s.now())
+}
+
+// ReplacePolicy atomically replaces the customizable controls of an active capability.
+func (s *AdminService) ReplacePolicy(ctx context.Context, request ReplacePolicyRequest) (broker.CapabilityPolicyReplacementResult, error) {
+	if s.store == nil || s.now == nil {
+		return broker.CapabilityPolicyReplacementResult{}, errors.New("admin service is unavailable")
+	}
+	request.Reason = strings.TrimSpace(request.Reason)
+	request.Actor = strings.TrimSpace(request.Actor)
+	if request.CapabilityID == "" || request.Reason == "" {
+		return broker.CapabilityPolicyReplacementResult{}, errors.New("capability ID and policy-change reason are required")
+	}
+	if len(request.Reason) > 512 || containsControl(request.Reason) {
+		return broker.CapabilityPolicyReplacementResult{}, errors.New("policy-change reason must be at most 512 bytes without control characters")
+	}
+	if len(request.Actor) > 128 || containsControl(request.Actor) {
+		return broker.CapabilityPolicyReplacementResult{}, errors.New("policy-change actor must be at most 128 bytes without control characters")
+	}
+	if err := broker.ValidatePolicy(request.Policy); err != nil {
+		return broker.CapabilityPolicyReplacementResult{}, err
+	}
+	return s.store.ReplaceCapabilityPolicy(ctx, broker.CapabilityPolicyReplacement{
+		CapabilityID: request.CapabilityID, Policy: request.Policy, Reason: request.Reason,
+		Actor: request.Actor,
+	})
+}
+
+// ListPolicyHistory returns permanent policy-change events for one capability.
+func (s *AdminService) ListPolicyHistory(ctx context.Context, query broker.CapabilityPolicyHistoryQuery) ([]broker.CapabilityPolicyEvent, error) {
+	if s.store == nil {
+		return nil, errors.New("admin service is unavailable")
+	}
+	return s.store.ListCapabilityPolicyEvents(ctx, query)
+}
+
 // ListAuditEvents returns redacted request records for offline inspection.
 func (s *AdminService) ListAuditEvents(ctx context.Context, query broker.AuditQuery) ([]broker.AuditEvent, error) {
 	if s.store == nil {
@@ -99,3 +152,7 @@ func (s *AdminService) ListAuditEvents(ctx context.Context, query broker.AuditQu
 }
 
 var _ Service = (*AdminService)(nil)
+
+func containsControl(value string) bool {
+	return strings.IndexFunc(value, unicode.IsControl) >= 0
+}

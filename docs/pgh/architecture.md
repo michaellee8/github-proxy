@@ -28,7 +28,14 @@ directly to PostgreSQL. There is no administrative HTTP API.
 
 - A Capability Token resolves to one immutable GitHub repository ID, canonical
   owner/name, one stored Upstream Credential, and one versioned Policy Profile.
-  Issuing another capability cannot change an existing repository row.
+  The profile name and version are immutable, but an offline operator may
+  replace its additional grants and Git ref authority while the capability is
+  active. Issuing another capability cannot change an existing repository row.
+- Each capability starts at Policy Revision 1. An effective policy replacement
+  locks the capability, replaces all mutable policy controls, increments the
+  revision, and appends a permanent Administrative Event in one PostgreSQL
+  transaction. Identical replacements are no-ops. Expired and revoked
+  capabilities remain inspectable but cannot be changed.
 - Only a SHA-256 hash of the capability secret is stored. Tokens can expire and
   can be revoked immediately.
 - Upstream Credentials are encrypted with AES-256-GCM and a named key before
@@ -53,8 +60,9 @@ directly to PostgreSQL. There is no administrative HTTP API.
   receive-pack ref commands, rejects ref deletion, and applies branch and tag
   policy before streaming pack data.
 - Git LFS operations use the same repository binding and Git write policy.
-- Redacted request audits go to PostgreSQL and structured JSON logs. A mutation
-  is denied unless its preflight event is durable; a read may continue during a
+- Redacted request audits go to PostgreSQL and structured JSON logs. Both audit
+  phases record the Policy Revision resolved for the request. A mutation is
+  denied unless its preflight event is durable; a read may continue during a
   database audit outage only after its structured event is emitted.
 - Every replica applies separate per-capability read and mutation rates plus a
   concurrency ceiling. The reverse proxy owns deployment-wide limits and
@@ -66,6 +74,9 @@ directly to PostgreSQL. There is no administrative HTTP API.
   command, and places extension data and state beneath `PGH_CONFIG_DIR`. This
   prevents direct telemetry egress and prevents `pgh extension` commands from
   reading or modifying the user's original `gh` extensions.
+- `/_pgh/v1/context` reports the Target Repository, sorted additional grants,
+  Git push tier, tag authority, and resolved Policy Revision. This extends the
+  existing response without changing its established fields.
 
 ## Deliberate limits
 
@@ -91,9 +102,12 @@ make autonomous code changes safe by itself.
   test PostgreSQL or GitHub connectivity.
 
 Treat a compromised Capability Token as access to every operation in its Policy
-Profile until it expires or is revoked. Prefer short expiration times, a
-dedicated Upstream Credential, restrictive Git push settings, GitHub branch
-protection, and network egress controls on the Agent Host.
+Profile and current policy assignment until it expires, is revoked, or its
+assignment is narrowed. A replacement takes effect for requests that resolve
+after its transaction commits. A request that already resolved a Session may
+finish under its recorded earlier Policy Revision. Prefer short expiration
+times, a dedicated Upstream Credential, restrictive Git push settings, GitHub
+branch protection, and network egress controls on the Agent Host.
 
 ## Network requirements
 

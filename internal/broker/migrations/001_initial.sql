@@ -43,14 +43,17 @@ CREATE TABLE IF NOT EXISTS pgh_capabilities (
     repository_id bigint NOT NULL,
     policy_name text NOT NULL,
     policy_version integer NOT NULL,
+    policy_revision bigint NOT NULL DEFAULT 1,
     policy_grants jsonb NOT NULL DEFAULT '{}'::jsonb,
     git_push text NOT NULL DEFAULT 'none',
     git_tags boolean NOT NULL DEFAULT false,
     expires_at timestamptz,
     revoked_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
+    policy_updated_at timestamptz NOT NULL DEFAULT now(),
     CHECK (octet_length(secret_hash) = 32),
     CHECK (policy_version > 0),
+    CHECK (policy_revision > 0),
     CHECK (git_push IN ('none', 'non-default', 'all')),
     FOREIGN KEY (credential_id, repository_id)
         REFERENCES pgh_repositories(credential_id, id)
@@ -60,12 +63,37 @@ CREATE INDEX IF NOT EXISTS pgh_capabilities_active_selector_idx
     ON pgh_capabilities(selector)
     WHERE revoked_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS pgh_capability_policy_events (
+    id bigserial PRIMARY KEY,
+    occurred_at timestamptz NOT NULL,
+    capability_id text NOT NULL REFERENCES pgh_capabilities(id),
+    repository_id bigint NOT NULL,
+    before_revision bigint NOT NULL,
+    after_revision bigint NOT NULL,
+    before_policy jsonb NOT NULL,
+    after_policy jsonb NOT NULL,
+    direction text NOT NULL,
+    reason text NOT NULL,
+    actor text,
+    CHECK (repository_id > 0),
+    CHECK (before_revision > 0),
+    CHECK (after_revision = before_revision + 1),
+    CHECK (direction IN ('broadened', 'narrowed', 'mixed')),
+    CHECK (reason <> ''),
+    CHECK (octet_length(reason) <= 512),
+    CHECK (actor IS NULL OR (actor <> '' AND octet_length(actor) <= 128))
+);
+
+CREATE INDEX IF NOT EXISTS pgh_capability_policy_events_capability_idx
+    ON pgh_capability_policy_events(capability_id, after_revision DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS pgh_audit_events (
     id bigserial PRIMARY KEY,
     occurred_at timestamptz NOT NULL,
     request_id text NOT NULL,
     phase text NOT NULL,
     capability_id text NOT NULL,
+    policy_revision bigint NOT NULL,
     repository_id bigint NOT NULL,
     method text NOT NULL,
     request_path text NOT NULL,
@@ -75,6 +103,7 @@ CREATE TABLE IF NOT EXISTS pgh_audit_events (
     CHECK (request_id <> ''),
     CHECK (phase IN ('preflight', 'result')),
     CHECK (capability_id <> ''),
+    CHECK (policy_revision > 0),
     CHECK (repository_id > 0),
     CHECK (method <> ''),
     CHECK (request_path <> ''),

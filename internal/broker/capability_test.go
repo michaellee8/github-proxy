@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,20 +16,27 @@ import (
 )
 
 type memoryCapabilityStore struct {
+	mu         sync.RWMutex
 	credential StoredCredential
 	capability StoredCapability
 }
 
 func (s *memoryCapabilityStore) CredentialByName(context.Context, string) (StoredCredential, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.credential, nil
 }
 
 func (s *memoryCapabilityStore) CreateCapability(_ context.Context, capability StoredCapability) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.capability = capability
 	return nil
 }
 
 func (s *memoryCapabilityStore) CapabilityBySelector(_ context.Context, selector string) (StoredCapability, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if selector != s.capability.Selector {
 		return StoredCapability{}, ErrCapabilityNotFound
 	}
@@ -36,8 +44,17 @@ func (s *memoryCapabilityStore) CapabilityBySelector(_ context.Context, selector
 }
 
 func (s *memoryCapabilityStore) UpdateRepositoryObservation(_ context.Context, _ string, repository Repository) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.capability.Repository = repository
 	return nil
+}
+
+func (s *memoryCapabilityStore) replacePolicy(policy Policy, revision int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.capability.Policy = policy
+	s.capability.PolicyRevision = revision
 }
 
 func TestIssuedCapabilityIsTheOnlyCredentialAcceptedByBroker(t *testing.T) {
@@ -128,9 +145,10 @@ func TestExpiredAndRevokedCapabilitiesAreRejected(t *testing.T) {
 				credential: credential,
 				capability: StoredCapability{
 					ID: "cap-1", Selector: "selector", SecretHash: hashCapabilitySecret("secret"), CredentialID: "cred-1",
-					Credential: credential,
-					Repository: Repository{ID: 1, Owner: "michaellee8", Name: "github-proxy", DefaultBranch: "main"},
-					Policy:     Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}}, ExpiresAt: tt.expiresAt, RevokedAt: tt.revokedAt,
+					PolicyRevision: 1,
+					Credential:     credential,
+					Repository:     Repository{ID: 1, Owner: "michaellee8", Name: "github-proxy", DefaultBranch: "main"},
+					Policy:         Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}}, ExpiresAt: tt.expiresAt, RevokedAt: tt.revokedAt,
 				},
 			}
 			authority := NewCapabilityAuthority(store, cipher, nil, func() time.Time { return now })
@@ -228,9 +246,10 @@ func TestCapabilityAuthorityRejectsUnsupportedStoredPolicy(t *testing.T) {
 	}, "upstream")
 	store := &memoryCapabilityStore{capability: StoredCapability{
 		ID: "cap-1", Selector: "selector", SecretHash: hashCapabilitySecret("secret"), CredentialID: "cred-1",
-		Credential: credential,
-		Repository: Repository{ID: 1, Owner: "owner", Name: "repo", DefaultBranch: "main"},
-		Policy:     Policy{Name: "developer", Version: 2, Git: GitPolicy{Push: GitPushNone}},
+		PolicyRevision: 1,
+		Credential:     credential,
+		Repository:     Repository{ID: 1, Owner: "owner", Name: "repo", DefaultBranch: "main"},
+		Policy:         Policy{Name: "developer", Version: 2, Git: GitPolicy{Push: GitPushNone}},
 	}}
 	authority := NewCapabilityAuthority(store, cipher, nil, time.Now)
 
@@ -249,8 +268,9 @@ func TestCapabilityAuthorityCachesReadsAndRevalidatesMutations(t *testing.T) {
 	}, "upstream")
 	store := &memoryCapabilityStore{capability: StoredCapability{
 		ID: "cap-1", Selector: "selector", SecretHash: hashCapabilitySecret("secret"), CredentialID: "cred-1",
-		Credential: credential,
-		Repository: Repository{ID: 99, Owner: "old", Name: "repo", DefaultBranch: "main", ETag: `"old"`, ValidatedAt: now},
+		PolicyRevision: 1,
+		Credential:     credential,
+		Repository:     Repository{ID: 99, Owner: "old", Name: "repo", DefaultBranch: "main", ETag: `"old"`, ValidatedAt: now},
 		Policy: Policy{
 			Name: "developer", Version: 1, Grants: map[string]bool{"contents.write": true},
 			Git: GitPolicy{Push: GitPushNonDefault},
@@ -312,9 +332,10 @@ func TestCapabilityAuthorityFollowsVerifiedOwnerNameRedirect(t *testing.T) {
 	}, "upstream")
 	store := &memoryCapabilityStore{capability: StoredCapability{
 		ID: "cap-1", Selector: "selector", SecretHash: hashCapabilitySecret("secret"), CredentialID: "cred-1",
-		Credential: credential,
-		Repository: Repository{ID: 99, Owner: "old", Name: "repo", DefaultBranch: "main", ValidatedAt: now.Add(-time.Hour)},
-		Policy:     Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}},
+		PolicyRevision: 1,
+		Credential:     credential,
+		Repository:     Repository{ID: 99, Owner: "old", Name: "repo", DefaultBranch: "main", ValidatedAt: now.Add(-time.Hour)},
+		Policy:         Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}},
 	}}
 	requests := 0
 	resolver := NewRepositoryResolver(roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -347,6 +368,51 @@ func TestCapabilityAuthorityFollowsVerifiedOwnerNameRedirect(t *testing.T) {
 	assert.Equal(t, "new", session.Repository.Owner)
 	assert.Equal(t, "trunk", session.Repository.DefaultBranch)
 	assert.Equal(t, 2, requests)
+}
+
+func TestCapabilityAuthorityReloadsPolicyAfterRepositoryRevalidation(t *testing.T) {
+	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.UTC)
+	cipher, err := NewCredentialCipher("primary", map[string][]byte{"primary": bytes.Repeat([]byte{0x42}, 32)}, bytes.NewReader(bytes.Repeat([]byte{0x24}, 64)))
+	require.NoError(t, err)
+	credential := encryptedStoredCredential(t, cipher, StoredCredential{
+		ID: "cred-1", Name: "work", UpstreamHost: "github.com", APIBaseURL: "https://api.github.com",
+		APIVersion: "2022-11-28", RepositoryResolution: RepositoryResolutionNumeric,
+	}, "upstream")
+	store := &memoryCapabilityStore{capability: StoredCapability{
+		ID: "cap-1", Selector: "selector", SecretHash: hashCapabilitySecret("secret"), CredentialID: "cred-1",
+		Credential: credential, PolicyRevision: 1,
+		Repository: Repository{ID: 99, Owner: "owner", Name: "repo", DefaultBranch: "main", ValidatedAt: now.Add(-time.Hour)},
+		Policy: Policy{
+			Name: "developer", Version: 1, Grants: map[string]bool{grantActionsWrite: true},
+			Git: GitPolicy{Push: GitPushNone},
+		},
+	}}
+	metadataStarted := make(chan struct{})
+	finishMetadata := make(chan struct{})
+	resolver := NewRepositoryResolver(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		close(metadataStarted)
+		<-finishMetadata
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"id":99,"owner":{"login":"owner"},"name":"repo","default_branch":"main"}`)),
+		}, nil
+	}), func() time.Time { return now }, 30*time.Second)
+	authority := NewCapabilityAuthority(store, cipher, resolver, func() time.Time { return now })
+	result := make(chan Session, 1)
+	errors := make(chan error, 1)
+	go func() {
+		session, err := authority.Resolve(context.Background(), "pgh_pat_selector.secret", RequireFreshRepository)
+		result <- session
+		errors <- err
+	}()
+	<-metadataStarted
+	store.replacePolicy(Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}}, 2)
+	close(finishMetadata)
+
+	session := <-result
+	require.NoError(t, <-errors)
+	assert.Equal(t, int64(2), session.PolicyRevision)
+	assert.False(t, session.Policy.Grants[grantActionsWrite])
 }
 
 func assertCapabilityStatus(t *testing.T, handler http.Handler, token string, status int) {

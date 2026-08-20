@@ -149,6 +149,27 @@ func (r *brokerRuntime) Revoke(ctx context.Context, id string) error {
 	return r.admin.Revoke(ctx, id)
 }
 
+func (r *brokerRuntime) ShowPolicy(ctx context.Context, id string) (broker.CapabilityPolicyView, error) {
+	if err := r.initialize(ctx); err != nil {
+		return broker.CapabilityPolicyView{}, err
+	}
+	return r.admin.ShowPolicy(ctx, id)
+}
+
+func (r *brokerRuntime) ReplacePolicy(ctx context.Context, request brokeradmin.ReplacePolicyRequest) (broker.CapabilityPolicyReplacementResult, error) {
+	if err := r.initialize(ctx); err != nil {
+		return broker.CapabilityPolicyReplacementResult{}, err
+	}
+	return r.admin.ReplacePolicy(ctx, request)
+}
+
+func (r *brokerRuntime) ListPolicyHistory(ctx context.Context, query broker.CapabilityPolicyHistoryQuery) ([]broker.CapabilityPolicyEvent, error) {
+	if err := r.initialize(ctx); err != nil {
+		return nil, err
+	}
+	return r.admin.ListPolicyHistory(ctx, query)
+}
+
 func (r *brokerRuntime) ListAuditEvents(ctx context.Context, query broker.AuditQuery) ([]broker.AuditEvent, error) {
 	if err := r.initialize(ctx); err != nil {
 		return nil, err

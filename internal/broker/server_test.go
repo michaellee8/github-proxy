@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,7 +30,11 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestBrokerContextReturnsBoundCapability(t *testing.T) {
 	handler := newTestHandler(t, HandlerOptions{
-		Authority: testAuthority(t),
+		Authority: authorityWithPolicy(t, Policy{
+			Name: "developer", Version: 1,
+			Grants: map[string]bool{grantChecksWrite: true, grantActionsWrite: true},
+			Git:    GitPolicy{Push: GitPushNone},
+		}),
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			t.Fatal("context request must not call GitHub")
 			return nil, nil
@@ -46,10 +51,77 @@ func TestBrokerContextReturnsBoundCapability(t *testing.T) {
 		"capability_id":"cap-1",
 		"upstream_host":"github.com",
 		"repository":{"id":1326468465,"owner":"michaellee8","name":"github-proxy"},
-		"policy":{"name":"developer","version":1},
+		"policy":{"name":"developer","version":1,"revision":1,"grants":["actions.write","checks.write"],"git":{"push":"none","tags":false}},
 		"expires_at":null,
 		"protocol_version":"1"
 	}`, res.Body.String())
+}
+
+func TestSameCapabilityTokenUsesNewPolicyOnNextRequestWithoutCancellingInFlightWork(t *testing.T) {
+	type policyState struct {
+		sync.RWMutex
+		policy   Policy
+		revision int64
+	}
+	state := &policyState{
+		policy:   Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}},
+		revision: 1,
+	}
+	authority := authorityFunc(func(_ context.Context, token string, _ RepositoryFreshness) (Session, error) {
+		if token != "pgh_pat_same-token" {
+			return Session{}, errors.New("unexpected capability token")
+		}
+		state.RLock()
+		defer state.RUnlock()
+		return Session{
+			CapabilityID: "cap-1", PolicyRevision: state.revision,
+			Repository: Repository{ID: 99, Owner: "owner", Name: "repo", DefaultBranch: "main"},
+			Upstream:   UpstreamAccess{Host: "github.com", APIBaseURL: "https://api.github.com", Token: "upstream"},
+			Policy:     state.policy,
+		}, nil
+	})
+	forwarded := make(chan struct{}, 1)
+	finish := make(chan struct{})
+	handler := newTestHandler(t, HandlerOptions{
+		Authority: authority,
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			forwarded <- struct{}{}
+			<-finish
+			return &http.Response{StatusCode: http.StatusAccepted, Header: make(http.Header), Body: http.NoBody}, nil
+		}),
+	})
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v3/repos/owner/repo/actions/runs/1/rerun", nil)
+		req.Header.Set("Authorization", "Bearer pgh_pat_same-token")
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+
+	denied := request()
+	require.Equal(t, http.StatusForbidden, denied.Code)
+
+	state.Lock()
+	state.policy = Policy{
+		Name: "developer", Version: 1, Grants: map[string]bool{grantActionsWrite: true},
+		Git: GitPolicy{Push: GitPushNone},
+	}
+	state.revision = 2
+	state.Unlock()
+	inFlight := make(chan *httptest.ResponseRecorder, 1)
+	go func() { inFlight <- request() }()
+	<-forwarded
+
+	state.Lock()
+	state.policy = Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}}
+	state.revision = 3
+	state.Unlock()
+	deniedAfterNarrowing := request()
+	require.Equal(t, http.StatusForbidden, deniedAfterNarrowing.Code)
+
+	close(finish)
+	completed := <-inFlight
+	require.Equal(t, http.StatusAccepted, completed.Code)
 }
 
 func TestBrokerRejectsMissingCapability(t *testing.T) {
@@ -408,7 +480,7 @@ func TestBrokerValidatesRESTRefFieldsAgainstGitPolicy(t *testing.T) {
 
 func testAuthority(t *testing.T) Authority {
 	t.Helper()
-	return authorityWithPolicy(t, Policy{Name: "developer", Version: 1})
+	return authorityWithPolicy(t, Policy{Name: "developer", Version: 1, Git: GitPolicy{Push: GitPushNone}})
 }
 
 func authorityWithPolicy(t *testing.T, policy Policy) Authority {
@@ -416,7 +488,8 @@ func authorityWithPolicy(t *testing.T, policy Policy) Authority {
 	return authorityFunc(func(_ context.Context, token string, _ RepositoryFreshness) (Session, error) {
 		require.Equal(t, "pgh_pat_selector_secret", token)
 		return Session{
-			CapabilityID: "cap-1",
+			CapabilityID:   "cap-1",
+			PolicyRevision: 1,
 			Repository: Repository{
 				ID: 1326468465, Owner: "michaellee8", Name: "github-proxy", DefaultBranch: "main",
 			},

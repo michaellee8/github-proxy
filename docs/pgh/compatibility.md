@@ -7,6 +7,21 @@ LFS operation is rejected before reaching GitHub.
 The rows below summarize individually registered method/path patterns. They do
 not grant every current or future endpoint beneath a resource prefix.
 
+## Capability policy assignment
+
+The Policy Profile name and version are fixed when a Repository Capability is
+issued. An offline operator may replace the active capability's complete set of
+additional grants, Git push tier, and tag authority without replacing its
+Capability Token. Repository and Upstream Credential bindings, token material,
+expiration, and revocation state remain unchanged by policy replacement.
+
+Each effective replacement increments the Policy Revision and appends a
+permanent Administrative Event. An identical replacement does neither. Changes
+use serialized, last-write-wins transactions and apply when a request resolves
+after commit. A request that already resolved may complete under the earlier
+policy and records that Policy Revision in both request-audit phases. Expired
+and revoked capabilities may be inspected but cannot be changed.
+
 ## REST API
 
 | Resource under `/repos/OWNER/REPO` | Read | Default mutation | Additional grant | Notes |

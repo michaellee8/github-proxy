@@ -15,6 +15,13 @@
 The process validates and connects to PostgreSQL, then applies embedded
 migrations before listening. Configuration errors fail startup.
 
+Mutable capability policy support changes the existing, predeployment
+`001_initial.sql` migration rather than adding another migration. No production
+deployment exists yet. If an evaluation database has already recorded that
+migration, erase and recreate that database before starting the updated Broker.
+For the local Compose stack, `docker compose down --volumes` performs this
+intentional reset and permanently deletes the local PostgreSQL volume.
+
 Each replica admits at most 300 reads and 60 mutations per capability per
 minute, with eight concurrent requests. Configure deployment-wide limits and
 request duration at the reverse proxy.
@@ -69,12 +76,17 @@ available.
 ## Inspect request audits
 
 Audit records contain method, path, repository and capability IDs, result
-status, and timing. They never contain headers, query strings, request bodies,
-or credentials.
+status, Policy Revision, and timing. They never contain headers, query strings,
+request bodies, or credentials.
 
 ```bash
 pgh-broker audit list --capability cap_SELECTOR --since 2026-08-01T00:00:00Z --limit 100
 ```
+
+Request-audit retention does not apply to capability policy Administrative
+Events. Inspect the permanent history with `pgh-broker capability policy
+history CAPABILITY_ID`; `--since` accepts RFC3339 and `--limit` accepts 1 to
+1000 events.
 
 ## Rotate an Upstream Credential
 

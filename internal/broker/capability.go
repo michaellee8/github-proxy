@@ -18,6 +18,8 @@ import (
 var (
 	ErrCapabilityInvalid  = errors.New("capability is invalid")
 	ErrCapabilityNotFound = errors.New("capability not found")
+	ErrCapabilityExpired  = errors.New("capability is expired")
+	ErrCapabilityRevoked  = errors.New("capability is revoked")
 	ErrCredentialNotFound = errors.New("upstream credential not found")
 )
 
@@ -41,15 +43,16 @@ type StoredCredential struct {
 
 // StoredCapability is the persistence representation resolved by a CapabilityStore.
 type StoredCapability struct {
-	ID           string
-	Selector     string
-	SecretHash   []byte
-	CredentialID string
-	Credential   StoredCredential
-	Repository   Repository
-	Policy       Policy
-	ExpiresAt    *time.Time
-	RevokedAt    *time.Time
+	ID             string
+	Selector       string
+	SecretHash     []byte
+	CredentialID   string
+	Credential     StoredCredential
+	Repository     Repository
+	Policy         Policy
+	PolicyRevision int64
+	ExpiresAt      *time.Time
+	RevokedAt      *time.Time
 }
 
 // CapabilityStore is the persistence boundary used by issuing and resolving capabilities.
@@ -132,7 +135,7 @@ func (c *CredentialCipher) aead(keyID string) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// IssueRequest describes one immutable Repository Capability.
+// IssueRequest describes the fixed bindings and initial policy of one Repository Capability.
 type IssueRequest struct {
 	CredentialName string
 	Repository     RepositoryRequest
@@ -196,7 +199,7 @@ func (i *CapabilityIssuer) Issue(ctx context.Context, request IssueRequest) (Iss
 	id := "cap_" + selector
 	stored := StoredCapability{
 		ID: id, Selector: selector, SecretHash: hashCapabilitySecret(secret), CredentialID: credential.ID, Credential: credential,
-		Repository: repository, Policy: request.Policy, ExpiresAt: request.ExpiresAt,
+		Repository: repository, Policy: request.Policy, PolicyRevision: 1, ExpiresAt: request.ExpiresAt,
 	}
 	if err := i.store.CreateCapability(ctx, stored); err != nil {
 		return IssuedCapability{}, fmt.Errorf("store capability: %w", err)
@@ -233,7 +236,7 @@ func (a *capabilityAuthority) Resolve(ctx context.Context, token string, freshne
 		return Session{}, ErrCapabilityInvalid
 	}
 	now := a.now()
-	if stored.RevokedAt != nil || (stored.ExpiresAt != nil && !stored.ExpiresAt.After(now)) {
+	if stored.PolicyRevision <= 0 || stored.RevokedAt != nil || (stored.ExpiresAt != nil && !stored.ExpiresAt.After(now)) {
 		return Session{}, ErrCapabilityInvalid
 	}
 	if err := ValidatePolicy(stored.Policy); err != nil {
@@ -256,12 +259,29 @@ func (a *capabilityAuthority) Resolve(ctx context.Context, token string, freshne
 			return Session{}, ErrRepositoryIdentity
 		}
 	}
+	// Policy resolution linearizes at this final read, after any repository
+	// identity refresh that could have blocked while an operator changed authority.
+	resolved, err := a.store.CapabilityBySelector(ctx, selector)
+	if err != nil || subtle.ConstantTimeCompare(resolved.SecretHash, hashCapabilitySecret(secret)) != 1 {
+		return Session{}, ErrCapabilityInvalid
+	}
+	if resolved.ID != stored.ID || resolved.CredentialID != stored.CredentialID || resolved.Repository.ID != stored.Repository.ID {
+		return Session{}, ErrCapabilityInvalid
+	}
+	now = a.now()
+	if resolved.PolicyRevision <= 0 || resolved.RevokedAt != nil || (resolved.ExpiresAt != nil && !resolved.ExpiresAt.After(now)) {
+		return Session{}, ErrCapabilityInvalid
+	}
+	if err := ValidatePolicy(resolved.Policy); err != nil {
+		return Session{}, ErrCapabilityInvalid
+	}
 	return Session{
-		CapabilityID: stored.ID,
-		Repository:   repository,
-		Upstream:     access,
-		Policy:       stored.Policy,
-		ExpiresAt:    stored.ExpiresAt,
+		CapabilityID:   resolved.ID,
+		PolicyRevision: resolved.PolicyRevision,
+		Repository:     repository,
+		Upstream:       access,
+		Policy:         resolved.Policy,
+		ExpiresAt:      resolved.ExpiresAt,
 	}, nil
 }
 
